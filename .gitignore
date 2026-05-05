@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime outputs
+data/
+logs/
+tmp/
+outputs/
+uploads/
+vendor/engines/ComfyUI/
+vendor/engines/stable-diffusion-webui/
+vendor/engines/**/.venv/
+vendor/engines/**/venv/
+vendor/engines/**/output/
+vendor/engines/**/outputs/
+vendor/engines/**/models/
+!vendor/
+!vendor/engines/
+!vendor/engines/.gitkeep
+
+# Model weights and large local assets
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.bin
+*.gguf
+models/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

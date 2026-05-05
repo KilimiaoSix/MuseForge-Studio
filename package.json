@@ -1,0 +1,21 @@
+{
+  "name": "sd-agent-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Product scaffold for a desktop SD image-generation agent.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:backend": "npm --workspace @sd-agent-studio/backend run dev",
+    "dev:ui": "npm --workspace @sd-agent-studio/ui-prototype run dev",
+    "bootstrap:engines": "bash scripts/bootstrap-engines.sh",
+    "start:engines": "bash scripts/start-dev.sh",
+    "check:engines": "bash scripts/check-engines.sh",
+    "export:screens": "node tools/export_screens.mjs",
+    "generate:assets": "python tools/generate_assets.py",
+    "check": "npm --workspaces run check"
+  }
+}

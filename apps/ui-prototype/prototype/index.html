@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SD Agent Studio</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">SA</div>
+          <div>
+            <div class="brand-name">SD Agent Studio</div>
+            <div class="brand-subtitle">Local creative agent</div>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="Primary">
+          <button class="nav-item" data-screen="overview"><span class="nav-icon">⌘</span><span>总览工作台</span></button>
+          <button class="nav-item" data-screen="generate"><span class="nav-icon">✦</span><span>自然语言生图</span></button>
+          <button class="nav-item" data-screen="edit"><span class="nav-icon">▣</span><span>智能改图</span></button>
+          <button class="nav-item" data-screen="lora"><span class="nav-icon">◈</span><span>LoRA 炼制</span></button>
+          <button class="nav-item" data-screen="models"><span class="nav-icon">▤</span><span>模型管家</span></button>
+          <button class="nav-item" data-screen="queue"><span class="nav-icon">≋</span><span>任务队列</span></button>
+          <button class="nav-item" data-screen="settings"><span class="nav-icon">⚙</span><span>Provider 设置</span></button>
+        </nav>
+
+        <div class="side-status">
+          <div class="status-card">
+            <div class="status-row">
+              <span>WebUI</span>
+              <strong class="ok">Connected</strong>
+            </div>
+            <div class="status-row">
+              <span>Provider</span>
+              <strong class="ok">OpenAI</strong>
+            </div>
+            <div class="status-row">
+              <span>VRAM</span>
+              <strong>9.8 / 12 GB</strong>
+            </div>
+            <div class="meter"><span style="width: 82%"></span></div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="screen-kicker">Project / Akiba Character Pack</div>
+            <h1 id="screen-title">总览工作台</h1>
+          </div>
+          <div class="top-actions">
+            <span class="connection-pill">Local SD: 127.0.0.1:7860</span>
+            <span class="connection-pill warn">2 jobs running</span>
+            <button class="primary-action">生成任务</button>
+          </div>
+        </header>
+
+        <section class="screen" data-screen-panel="overview">
+          <div class="overview-grid">
+            <div class="panel span-2">
+              <div class="panel-header">
+                <div>
+                  <h2>当前任务</h2>
+                  <p>Agent 正在执行自然语言生图和 LoRA 数据质检。</p>
+                </div>
+                <button class="small-button">查看队列</button>
+              </div>
+              <div class="task-timeline">
+                <div class="task-row active">
+                  <div class="task-dot"></div>
+                  <div>
+                    <strong>雨夜咖啡馆角色图</strong>
+                    <span>txt2img · batch 4 · 68%</span>
+                  </div>
+                  <div class="task-progress"><span style="width:68%"></span></div>
+                </div>
+                <div class="task-row">
+                  <div class="task-dot amber"></div>
+                  <div>
+                    <strong>silver_aria LoRA 数据质检</strong>
+                    <span>42 张图片 · 建议剔除 5 张</span>
+                  </div>
+                  <div class="task-progress"><span style="width:42%"></span></div>
+                </div>
+                <div class="task-row">
+                  <div class="task-dot green"></div>
+                  <div>
+                    <strong>模型索引刷新</strong>
+                    <span>checkpoint 2 · LoRA 1 · ControlNet 15</span>
+                  </div>
+                  <div class="task-progress complete"><span style="width:100%"></span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header compact">
+                <h2>系统状态</h2>
+              </div>
+              <div class="metrics">
+                <div><span>WebUI</span><strong>在线</strong></div>
+                <div><span>GPU</span><strong>82%</strong></div>
+                <div><span>Provider</span><strong>OpenAI</strong></div>
+                <div><span>Queue</span><strong>6</strong></div>
+              </div>
+            </div>
+
+            <div class="panel span-2">
+              <div class="panel-header">
+                <div>
+                  <h2>最近生成</h2>
+                  <p>保留参数、seed 和 Agent 解释，可继续迭代。</p>
+                </div>
+                <button class="small-button">打开画廊</button>
+              </div>
+              <div class="image-strip">
+                <img src="assets/art-01.png" alt="recent generation">
+                <img src="assets/art-02.png" alt="recent generation">
+                <img src="assets/art-03.png" alt="recent generation">
+                <img src="assets/art-04.png" alt="recent generation">
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header compact">
+                <h2>快捷入口</h2>
+              </div>
+              <div class="quick-actions">
+                <button data-screen="generate">中文生图</button>
+                <button data-screen="edit">上传改图</button>
+                <button data-screen="lora">炼制 LoRA</button>
+                <button data-screen="models">扫描模型</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen-panel="generate">
+          <div class="workspace-grid generate-grid">
+            <div class="panel chat-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>自然语言需求</h2>
+                  <p>Agent 会转换成 prompt、参数和模型选择。</p>
+                </div>
+              </div>
+              <div class="conversation">
+                <div class="bubble user">画一个银发少女，穿黑色礼服，坐在雨夜咖啡馆窗边，精致插画，适合手机壁纸。</div>
+                <div class="bubble agent">已识别为竖版二次元角色图。建议使用 SDXL 动漫模型，开启高清修复和 ADetailer，输出 4 张构图方案。</div>
+                <div class="bubble user subtle">脸更温柔一点，背景暗一些，不要全身。</div>
+              </div>
+              <div class="prompt-input">
+                <textarea>保持上一轮人物设定，改成半身头像构图，雨夜氛围更强。</textarea>
+                <button class="primary-action">解析方案</button>
+              </div>
+            </div>
+
+            <div class="panel plan-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Agent 生成方案</h2>
+                  <p>所有自动决策都可以编辑或锁定。</p>
+                </div>
+                <span class="confidence">Confidence 91%</span>
+              </div>
+              <label>正面提示词</label>
+              <textarea class="code-area">1girl, silver hair, black evening dress, sitting by cafe window, rainy night, soft expression, half body portrait, cinematic lighting, detailed eyes, elegant composition, anime illustration, high quality</textarea>
+              <label>负面提示词</label>
+              <textarea class="code-area small">bad hands, extra fingers, low quality, blurry, watermark, text, deformed face, overexposed</textarea>
+              <div class="decision-list">
+                <div><span>模型</span><strong>animagineXL40_v4Opt</strong></div>
+                <div><span>LoRA</span><strong>portrait · 0.65</strong></div>
+                <div><span>ControlNet</span><strong>无，保持自由构图</strong></div>
+                <div><span>理由</span><strong>竖版插画，主体半身，适合 SDXL 动漫模型</strong></div>
+              </div>
+            </div>
+
+            <div class="panel params-panel">
+              <div class="panel-header compact">
+                <h2>生成参数</h2>
+              </div>
+              <div class="param-grid">
+                <label>尺寸<input value="832 × 1472"></label>
+                <label>Steps<input value="28"></label>
+                <label>CFG<input value="6.5"></label>
+                <label>Batch<input value="4"></label>
+                <label>Sampler<input value="DPM++ 2M Karras"></label>
+                <label>Seed<input value="-1"></label>
+              </div>
+              <div class="toggle-list">
+                <div><span>高清修复</span><strong>开启 · 1.5x</strong></div>
+                <div><span>ADetailer</span><strong>开启 · face</strong></div>
+                <div><span>参数锁定</span><strong>模型 / 尺寸</strong></div>
+              </div>
+              <button class="primary-action wide">生成 4 张</button>
+            </div>
+
+            <div class="panel results-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>生成结果</h2>
+                  <p>点击任意图继续改图、放大或炼制样张。</p>
+                </div>
+              </div>
+              <div class="gallery-grid">
+                <img src="assets/art-01.png" alt="generated result">
+                <img src="assets/art-02.png" alt="generated result">
+                <img src="assets/art-03.png" alt="generated result">
+                <img src="assets/art-04.png" alt="generated result">
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen-panel="edit">
+          <div class="workspace-grid edit-grid">
+            <div class="panel source-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>原图与区域</h2>
+                  <p>支持手动画蒙版或由 Agent 推荐区域。</p>
+                </div>
+                <button class="small-button">导入图片</button>
+              </div>
+              <div class="compare-stage">
+                <img src="assets/art-02.png" alt="source image">
+                <div class="mask-box">背景区域</div>
+              </div>
+              <div class="tool-row">
+                <button>画笔</button>
+                <button>橡皮</button>
+                <button>自动选区</button>
+                <button>清除</button>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>改图指令</h2>
+                  <p>Agent 自动选择 img2img / inpaint / ControlNet。</p>
+                </div>
+              </div>
+              <textarea class="instruction">保持人物脸部和姿势，把背景换成雨后的海边黄昏，整体更柔和，不要改变礼服。</textarea>
+              <div class="decision-card">
+                <div><span>任务类型</span><strong>局部重绘</strong></div>
+                <div><span>保持内容</span><strong>人物脸部 / 姿势 / 礼服</strong></div>
+                <div><span>修改区域</span><strong>背景</strong></div>
+                <div><span>Denoise</span><strong>0.45</strong></div>
+                <div><span>ControlNet</span><strong>Depth · weight 0.75</strong></div>
+              </div>
+              <button class="primary-action wide">执行改图</button>
+            </div>
+
+            <div class="panel output-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>前后对比</h2>
+                  <p>结果保留参数，可继续送入放大或局部重绘。</p>
+                </div>
+              </div>
+              <div class="before-after">
+                <div><span>Before</span><img src="assets/art-02.png" alt="before"></div>
+                <div><span>After</span><img src="assets/art-05.png" alt="after"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen-panel="lora">
+          <div class="workspace-grid lora-grid">
+            <div class="panel span-3">
+              <div class="panel-header">
+                <div>
+                  <h2>LoRA 炼制向导</h2>
+                  <p>从图片导入到标签、训练配置、样张评估和一键安装。</p>
+                </div>
+                <button class="primary-action">开始训练</button>
+              </div>
+              <div class="steps">
+                <span class="done">导入</span>
+                <span class="done">质检</span>
+                <span class="active">标签</span>
+                <span>配置</span>
+                <span>训练</span>
+                <span>评估</span>
+                <span>安装</span>
+              </div>
+            </div>
+
+            <div class="panel dataset-panel">
+              <div class="panel-header compact">
+                <h2>图片质检</h2>
+              </div>
+              <div class="dataset-grid">
+                <img src="assets/lora-01.png" alt="dataset">
+                <img src="assets/lora-02.png" alt="dataset">
+                <img src="assets/lora-03.png" alt="dataset">
+                <img src="assets/lora-04.png" alt="dataset">
+                <img src="assets/lora-05.png" alt="dataset">
+                <img src="assets/lora-06.png" alt="dataset">
+              </div>
+              <div class="quality-list">
+                <div><strong>42</strong><span>总图片</span></div>
+                <div><strong>34</strong><span>推荐使用</span></div>
+                <div><strong>5</strong><span>建议剔除</span></div>
+                <div><strong>3</strong><span>需裁剪</span></div>
+              </div>
+            </div>
+
+            <div class="panel tag-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>标签清洗</h2>
+                  <p>WD14 生成标签，LLM 删除干扰项并保留角色特征。</p>
+                </div>
+              </div>
+              <div class="tag-cloud">
+                <span>silver hair</span><span>blue eyes</span><span>black dress</span><span>long hair</span><span>soft smile</span><span>portrait</span><span>solo</span><span>hair ornament</span>
+              </div>
+              <textarea class="code-area">trigger: silver_aria
+kept: silver hair, blue eyes, black dress, long hair, gentle expression
+removed: watermark, blurry background, random furniture, duplicate pose</textarea>
+            </div>
+
+            <div class="panel train-panel">
+              <div class="panel-header compact">
+                <h2>训练配置</h2>
+              </div>
+              <div class="param-grid">
+                <label>Base<input value="animagineXL40"></label>
+                <label>Resolution<input value="768"></label>
+                <label>Repeats<input value="10"></label>
+                <label>Epochs<input value="12"></label>
+                <label>Batch<input value="2"></label>
+                <label>LR<input value="1e-4"></label>
+                <label>Dim<input value="32"></label>
+                <label>Alpha<input value="16"></label>
+              </div>
+              <div class="decision-list">
+                <div><span>Optimizer</span><strong>AdamW8bit</strong></div>
+                <div><span>Caption</span><strong>WD14 + LLM cleanup</strong></div>
+                <div><span>评估</span><strong>每 2 epochs 出样张</strong></div>
+              </div>
+            </div>
+
+            <div class="panel eval-panel">
+              <div class="panel-header compact">
+                <h2>样张评估</h2>
+              </div>
+              <div class="eval-grid">
+                <img src="assets/art-03.png" alt="sample">
+                <img src="assets/art-04.png" alt="sample">
+              </div>
+              <div class="score-list">
+                <div><span>角色相似度</span><strong>86</strong></div>
+                <div><span>泛化能力</span><strong>78</strong></div>
+                <div><span>过拟合风险</span><strong class="warn-text">中低</strong></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen-panel="models">
+          <div class="panel full-panel">
+            <div class="panel-header">
+              <div>
+                <h2>模型管家</h2>
+                <p>扫描本地 checkpoint、LoRA、VAE、ControlNet，并建立 Agent 用途索引。</p>
+              </div>
+              <button class="primary-action">扫描本地模型</button>
+            </div>
+            <div class="table model-table">
+              <div class="table-head"><span>名称</span><span>类型</span><span>架构</span><span>推荐用途</span><span>触发词 / 权重</span><span>状态</span></div>
+              <div><span>animagineXL40_v4Opt</span><span>Checkpoint</span><span>SDXL</span><span>二次元 / 插画 / 角色图</span><span>-</span><span class="ok">可用</span></div>
+              <div><span>anything-v5-PrtRE</span><span>Checkpoint</span><span>SD1.5</span><span>头像 / 轻量出图</span><span>-</span><span class="ok">可用</span></div>
+              <div><span>portrait</span><span>LoRA</span><span>SD1.5</span><span>人像细节 / 半身构图</span><span>&lt;lora:portrait:0.65&gt;</span><span class="ok">可用</span></div>
+              <div><span>control_v11p_sd15_openpose</span><span>ControlNet</span><span>SD1.5</span><span>姿势控制</span><span>weight 0.75</span><span class="ok">可用</span></div>
+              <div><span>controlnet++_union_sdxl_promax</span><span>ControlNet</span><span>SDXL</span><span>多控制合一</span><span>weight 0.65</span><span class="ok">可用</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen-panel="queue">
+          <div class="workspace-grid queue-grid">
+            <div class="panel span-2">
+              <div class="panel-header">
+                <div>
+                  <h2>任务队列</h2>
+                  <p>统一管理生图、改图、放大、训练和评估任务。</p>
+                </div>
+                <button class="small-button">暂停全部</button>
+              </div>
+              <div class="queue-list">
+                <div class="queue-item running"><strong>txt2img · 雨夜咖啡馆</strong><span>68% · ETA 01:12</span><em>GPU 82%</em></div>
+                <div class="queue-item running"><strong>LoRA 质检 · silver_aria</strong><span>42 / 42 images</span><em>CPU</em></div>
+                <div class="queue-item"><strong>upscale · result_0421</strong><span>等待中</span><em>VRAM 预估 6GB</em></div>
+                <div class="queue-item failed"><strong>Provider 评估 · sample batch</strong><span>失败：API timeout</span><em>可重试</em></div>
+                <div class="queue-item"><strong>inpaint · 海边黄昏背景</strong><span>等待中</span><em>ControlNet depth</em></div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header compact">
+                <h2>资源占用</h2>
+              </div>
+              <div class="resource-bars">
+                <div><span>GPU</span><div class="meter"><span style="width:82%"></span></div><strong>82%</strong></div>
+                <div><span>VRAM</span><div class="meter"><span style="width:76%"></span></div><strong>9.1GB</strong></div>
+                <div><span>CPU</span><div class="meter"><span style="width:38%"></span></div><strong>38%</strong></div>
+                <div><span>Disk</span><div class="meter"><span style="width:54%"></span></div><strong>54%</strong></div>
+              </div>
+            </div>
+
+            <div class="panel span-3">
+              <div class="panel-header compact">
+                <h2>任务日志</h2>
+              </div>
+              <pre class="log-box">[14:22:10] txt2img started: animagineXL40_v4Opt, 832x1472, batch=4
+[14:22:18] ADetailer queued: face_yolov8n
+[14:23:02] LoRA dataset scan finished: 34 accepted, 5 rejected, 3 need crop
+[14:23:19] Provider evaluation failed: request timeout after 30s
+[14:23:25] Queue policy: keep SD jobs running, retry provider later</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen" data-screen-panel="settings">
+          <div class="workspace-grid settings-grid">
+            <div class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Provider 列表</h2>
+                  <p>用于 prompt、标签、评估和任务规划。</p>
+                </div>
+                <button class="small-button">新增</button>
+              </div>
+              <div class="provider-list">
+                <button class="selected">OpenAI · 默认</button>
+                <button>OpenAI-compatible · 本地网关</button>
+                <button>Local · LM Studio</button>
+                <button>Claude 类接口</button>
+              </div>
+            </div>
+
+            <div class="panel span-2">
+              <div class="panel-header">
+                <div>
+                  <h2>OpenAI Provider</h2>
+                  <p>连接测试不会影响本地 WebUI 生图能力。</p>
+                </div>
+                <span class="connection-pill ok-pill">Connected</span>
+              </div>
+              <div class="settings-form">
+                <label>Base URL<input value="https://api.openai.com/v1"></label>
+                <label>API Key<input value="sk-••••••••••••••••••"></label>
+                <label>模型名<input value="gpt-4.1-mini"></label>
+                <label>超时时间<input value="30s"></label>
+                <label>最大输出<input value="2048 tokens"></label>
+                <label>默认用途<input value="prompt / 参数 / 标签清洗 / 评估"></label>
+              </div>
+              <div class="settings-actions">
+                <button class="small-button">测试连接</button>
+                <button class="primary-action">保存设置</button>
+              </div>
+            </div>
+
+            <div class="panel span-3">
+              <div class="panel-header compact">
+                <h2>协议适配策略</h2>
+              </div>
+              <div class="provider-matrix">
+                <div><strong>OpenAI</strong><span>Responses / Chat Completions · 用于高质量规划和 prompt</span></div>
+                <div><strong>OpenAI-compatible</strong><span>统一 base_url + model · 适配本地或第三方网关</span></div>
+                <div><strong>Local</strong><span>Ollama / LM Studio / llama.cpp · 离线低成本解析</span></div>
+                <div><strong>Claude 类接口</strong><span>Messages 风格 · 用于长文本规划和训练诊断</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
+

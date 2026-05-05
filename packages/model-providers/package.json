@@ -1,0 +1,14 @@
+{
+  "name": "@sd-agent-studio/model-providers",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "@sd-agent-studio/shared": "0.1.0"
+  },
+  "scripts": {
+    "check": "node src/index.js"
+  }
+}
+

@@ -1,0 +1,11 @@
+{
+  "name": "@sd-agent-studio/shared",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "check": "node src/index.js"
+  }
+}
+

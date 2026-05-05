@@ -1,0 +1,16 @@
+{
+  "name": "@sd-agent-studio/backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/server.js",
+  "dependencies": {
+    "@sd-agent-studio/model-providers": "0.1.0",
+    "@sd-agent-studio/shared": "0.1.0"
+  },
+  "scripts": {
+    "dev": "node src/server.js",
+    "check": "node src/server.js --check"
+  }
+}
+
