@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 ENGINE="${INFERENCE_BACKEND:-comfyui}"
 
 case "$ENGINE" in
@@ -38,4 +46,3 @@ echo "Backend: http://127.0.0.1:8787"
 echo "UI:      http://127.0.0.1:5177"
 echo "Engine:  $ENGINE"
 echo "Logs:    $ROOT/logs"
-

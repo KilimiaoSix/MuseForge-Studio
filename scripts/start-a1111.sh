@@ -2,9 +2,21 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 PORT="${A1111_PORT:-7860}"
 ENGINE_PATH="$ROOT/vendor/engines/stable-diffusion-webui"
 WEBUI_SH="$ENGINE_PATH/webui.sh"
+TAMING_PATH="$ENGINE_PATH/repositories/taming-transformers"
+
+: "${HF_ENDPOINT:=https://hf-mirror.com}"
+export HF_ENDPOINT
 
 if [[ ! -f "$WEBUI_SH" ]]; then
   echo "A1111 WebUI is not installed. Run scripts/bootstrap-engines.sh first." >&2
@@ -13,5 +25,7 @@ fi
 
 cd "$ENGINE_PATH"
 chmod +x "$WEBUI_SH"
-exec "$WEBUI_SH" --api --listen --port "$PORT"
-
+if [[ -d "$TAMING_PATH" ]]; then
+  export PYTHONPATH="${TAMING_PATH}${PYTHONPATH:+:$PYTHONPATH}"
+fi
+exec "$WEBUI_SH" --api --listen --port "$PORT" --no-download-sd-model

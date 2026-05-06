@@ -1,11 +1,11 @@
 # UI Prototype
 
-Static high-fidelity prototype for SD Agent Studio.
+React/Vite front-end for SD Agent Studio. The generate screen is wired to the local backend and A1111 WebUI.
 
 Open:
 
 ```text
-prototype/index.html
+http://127.0.0.1:5177
 ```
 
 Screens:
@@ -18,9 +18,8 @@ Screens:
 - `?screen=queue`
 - `?screen=settings`
 
-Run a local static server:
+Run the Vite dev server:
 
 ```bash
 npm run dev
 ```
-

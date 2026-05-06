@@ -32,15 +32,17 @@ export function createGenerationPlan(overrides = {}) {
     checkpoint: "",
     lora: [],
     controlnet: [],
-    width: 832,
-    height: 1216,
-    sampler: "DPM++ 2M Karras",
-    steps: 28,
-    cfg_scale: 6.5,
+    width: 512,
+    height: 512,
+    target_width: null,
+    target_height: null,
+    sampler: "Euler a",
+    steps: 8,
+    cfg_scale: 5,
     seed: -1,
-    batch_size: 4,
-    hires_fix: true,
-    adetailer: true,
+    batch_size: 1,
+    hires_fix: false,
+    adetailer: false,
     rationale: "",
     ...overrides,
   };
@@ -80,15 +82,79 @@ export function createLoraTrainingPlan(overrides = {}) {
 
 export function normalizeGenerationPlan(plan = {}) {
   const normalized = createGenerationPlan(plan);
-  normalized.width = clampInteger(normalized.width, 256, 2048, 832);
-  normalized.height = clampInteger(normalized.height, 256, 2048, 1216);
-  normalized.steps = clampInteger(normalized.steps, 1, 80, 28);
-  normalized.cfg_scale = clampNumber(normalized.cfg_scale, 1, 20, 6.5);
-  normalized.batch_size = clampInteger(normalized.batch_size, 1, 16, 4);
+  const requestedWidth = clampInteger(normalized.width, 256, 2048, 512);
+  const requestedHeight = clampInteger(normalized.height, 256, 2048, 512);
+  const baseSize = recommendedBaseSize(requestedWidth, requestedHeight);
+  normalized.width = baseSize.width;
+  normalized.height = baseSize.height;
+  normalized.target_width = optionalInteger(normalized.target_width, 256, 4096);
+  normalized.target_height = optionalInteger(normalized.target_height, 256, 4096);
+  if ((!normalized.target_width || !normalized.target_height) && (requestedWidth !== baseSize.width || requestedHeight !== baseSize.height)) {
+    normalized.target_width = requestedWidth;
+    normalized.target_height = requestedHeight;
+  }
+  if (normalized.target_width === normalized.width && normalized.target_height === normalized.height) {
+    normalized.target_width = null;
+    normalized.target_height = null;
+  }
+  normalized.steps = clampInteger(normalized.steps, 1, 80, 8);
+  normalized.cfg_scale = clampNumber(normalized.cfg_scale, 1, 20, 5);
+  normalized.batch_size = clampInteger(normalized.batch_size, 1, 16, 1);
   normalized.seed = Number.isFinite(Number(normalized.seed)) ? Number(normalized.seed) : -1;
-  normalized.lora = Array.isArray(normalized.lora) ? normalized.lora : [];
+  normalized.lora = normalizeLoras(normalized.lora);
   normalized.controlnet = Array.isArray(normalized.controlnet) ? normalized.controlnet : [];
+  normalized.hires_fix = normalizeHiresFix(normalized);
   return normalized;
+}
+
+export function normalizeHiresFix(plan = {}) {
+  const baseWidth = clampInteger(plan.width, 256, 2048, 512);
+  const baseHeight = clampInteger(plan.height, 256, 2048, 512);
+  const targetWidth = optionalInteger(plan.target_width ?? plan.hires_fix?.target_width, 256, 4096);
+  const targetHeight = optionalInteger(plan.target_height ?? plan.hires_fix?.target_height, 256, 4096);
+  const targetDiffers = Boolean(targetWidth && targetHeight && (targetWidth !== baseWidth || targetHeight !== baseHeight));
+  const source = typeof plan.hires_fix === "object" && plan.hires_fix ? plan.hires_fix : {};
+  const enabled = targetDiffers;
+
+  if (!enabled) return false;
+
+  return {
+    enabled: true,
+    mode: source.mode || "resize",
+    target_width: targetWidth,
+    target_height: targetHeight,
+    denoising_strength: clampNumber(source.denoising_strength, 0, 1, 0.35),
+    upscaler: source.upscaler || "Latent",
+    second_pass_steps: clampInteger(source.second_pass_steps, 1, 80, Math.max(8, Math.round(clampInteger(plan.steps, 1, 80, 8) * 0.5))),
+  };
+}
+
+export function recommendedBaseSize(width = 512, height = 512) {
+  const safeWidth = clampInteger(width, 256, 2048, 512);
+  const safeHeight = clampInteger(height, 256, 2048, 512);
+  const ratio = safeWidth / safeHeight;
+  if (ratio < 0.9) return { width: 512, height: 768 };
+  if (ratio > 1.1) return { width: 768, height: 512 };
+  return { width: 512, height: 512 };
+}
+
+export function normalizeLoras(loras = []) {
+  if (!Array.isArray(loras)) return [];
+  return loras
+    .map((lora) => {
+      if (typeof lora === "string") {
+        return { name: lora, weight: 1, trigger_words: [] };
+      }
+      if (!lora || typeof lora !== "object") return null;
+      const name = String(lora.name || lora.alias || lora.model || lora.filename || "").trim();
+      if (!name) return null;
+      const weight = clampNumber(lora.weight ?? lora.strength ?? 1, -2, 2, 1);
+      const triggerWords = Array.isArray(lora.trigger_words)
+        ? lora.trigger_words.filter(Boolean).map(String)
+        : String(lora.trigger_words || lora.trigger || "").split(",").map((item) => item.trim()).filter(Boolean);
+      return { ...lora, name, weight, trigger_words: triggerWords };
+    })
+    .filter(Boolean);
 }
 
 function clampInteger(value, min, max, fallback) {
@@ -97,9 +163,15 @@ function clampInteger(value, min, max, fallback) {
   return Math.max(min, Math.min(max, number));
 }
 
+function optionalInteger(value, min, max) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(min, Math.min(max, number));
+}
+
 function clampNumber(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, number));
 }
-

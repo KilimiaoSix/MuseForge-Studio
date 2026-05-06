@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 INSTALL_DIR="${ENGINE_INSTALL_DIR:-vendor/engines}"
 PYTHON_EXE="${PYTHON_EXE:-python3}"
 COMFY_ONLY=0
@@ -85,4 +93,3 @@ fi
 
 echo "Engine bootstrap complete."
 echo "Model weights are not downloaded. Place checkpoints in the engine model folders manually."
-

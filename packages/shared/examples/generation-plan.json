@@ -10,15 +10,24 @@
     }
   ],
   "controlnet": [],
-  "width": 832,
-  "height": 1472,
+  "width": 512,
+  "height": 768,
+  "target_width": 832,
+  "target_height": 1472,
   "sampler": "DPM++ 2M Karras",
   "steps": 28,
   "cfg_scale": 6.5,
   "seed": -1,
   "batch_size": 4,
-  "hires_fix": true,
+  "hires_fix": {
+    "enabled": true,
+    "mode": "resize",
+    "target_width": 832,
+    "target_height": 1472,
+    "denoising_strength": 0.35,
+    "upscaler": "Latent",
+    "second_pass_steps": 14
+  },
   "adetailer": true,
   "rationale": "竖版动漫角色图，适合 SDXL 动漫模型，开启高清修复和人脸细化。"
 }
-

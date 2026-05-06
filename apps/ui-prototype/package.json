@@ -4,8 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "node server.js",
-    "check": "node server.js --check"
+    "dev": "vite --host 127.0.0.1 --port 5177",
+    "check": "vite build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   }
 }
-

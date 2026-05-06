@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 check_command() {
   local name="$1"
   if command -v "$name" >/dev/null 2>&1; then
@@ -68,4 +75,3 @@ echo "a1111.path=$A1111_PATH"
 echo "a1111.port=7860"
 echo "a1111.portOpen=$(check_port 7860)"
 echo "a1111.health=$(check_http "${A1111_BASE_URL:-http://127.0.0.1:7860}/sdapi/v1/sd-models")"
-

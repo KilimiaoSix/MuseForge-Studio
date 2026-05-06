@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 PORT="${COMFYUI_PORT:-8188}"
 HOST_ADDRESS="${COMFYUI_HOST:-127.0.0.1}"
 ENGINE_PATH="$ROOT/vendor/engines/ComfyUI"
@@ -19,4 +27,3 @@ fi
 
 cd "$ENGINE_PATH"
 exec "$PYTHON" main.py --listen "$HOST_ADDRESS" --port "$PORT"
-
