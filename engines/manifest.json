@@ -2,23 +2,6 @@
   "version": "0.1.0",
   "installDir": "vendor/engines",
   "engines": {
-    "comfyui": {
-      "name": "ComfyUI",
-      "repoUrl": "https://github.com/comfyanonymous/ComfyUI.git",
-      "branch": "master",
-      "directory": "ComfyUI",
-      "port": 8188,
-      "baseUrl": "http://127.0.0.1:8188",
-      "healthPath": "/system_stats",
-      "startCommand": ".venv\\Scripts\\python.exe main.py --listen 127.0.0.1 --port 8188",
-      "modelDirs": {
-        "checkpoints": "models/checkpoints",
-        "loras": "models/loras",
-        "vae": "models/vae",
-        "controlnet": "models/controlnet",
-        "outputs": "output"
-      }
-    },
     "a1111": {
       "name": "AUTOMATIC1111 Stable Diffusion WebUI",
       "repoUrl": "https://github.com/AUTOMATIC1111/stable-diffusion-webui.git",
@@ -38,4 +21,3 @@
     }
   }
 }
-

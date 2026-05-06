@@ -36,25 +36,21 @@ $checks = @(
   Test-CommandStatus "git"
   Test-CommandStatus "node"
   Test-CommandStatus "npm"
-  Test-CommandStatus $(if ($env:PYTHON_EXE) { $env:PYTHON_EXE } else { "python" })
 )
 
 Write-Host "Tool checks"
 $checks | Format-Table -AutoSize
 
-Write-Host "`nEngine checks"
-foreach ($key in @("comfyui", "a1111")) {
-  $engine = $Manifest.engines.$key
-  $path = Join-Path $InstallDir $engine.directory
-  $url = "$($engine.baseUrl)$($engine.healthPath)"
-  [pscustomobject]@{
-    engine = $key
-    installed = Test-Path $path
-    path = $path
-    port = $engine.port
-    portOpen = Test-Port $engine.port
-    health = (Test-Http $url).ok
-    healthUrl = $url
-  } | Format-List
-}
-
+Write-Host "`nA1111 engine check"
+$engine = $Manifest.engines.a1111
+$path = Join-Path $InstallDir $engine.directory
+$url = "$($engine.baseUrl)$($engine.healthPath)"
+[pscustomobject]@{
+  engine = "a1111"
+  installed = Test-Path $path
+  path = $path
+  port = $engine.port
+  portOpen = Test-Port $engine.port
+  health = (Test-Http $url).ok
+  healthUrl = $url
+} | Format-List

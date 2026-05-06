@@ -11,6 +11,7 @@ export const ProviderTypes = Object.freeze({
   OPENAI_COMPATIBLE: "openai-compatible",
   LOCAL: "local",
   ANTHROPIC: "anthropic",
+  MOCK: "mock",
 });
 
 export const defaultNegativePrompt = [
@@ -82,6 +83,9 @@ export function createLoraTrainingPlan(overrides = {}) {
 
 export function normalizeGenerationPlan(plan = {}) {
   const normalized = createGenerationPlan(plan);
+  if (![TaskTypes.TXT2IMG, TaskTypes.IMG2IMG, TaskTypes.INPAINT, TaskTypes.UPSCALE].includes(normalized.task_type)) {
+    normalized.task_type = TaskTypes.TXT2IMG;
+  }
   const requestedWidth = clampInteger(normalized.width, 256, 2048, 512);
   const requestedHeight = clampInteger(normalized.height, 256, 2048, 512);
   const baseSize = recommendedBaseSize(requestedWidth, requestedHeight);
@@ -114,18 +118,18 @@ export function normalizeHiresFix(plan = {}) {
   const targetHeight = optionalInteger(plan.target_height ?? plan.hires_fix?.target_height, 256, 4096);
   const targetDiffers = Boolean(targetWidth && targetHeight && (targetWidth !== baseWidth || targetHeight !== baseHeight));
   const source = typeof plan.hires_fix === "object" && plan.hires_fix ? plan.hires_fix : {};
-  const enabled = targetDiffers;
+  const enabled = targetDiffers && (plan.hires_fix === true || (source.enabled === true && source.mode !== "resize"));
 
   if (!enabled) return false;
 
   return {
     enabled: true,
-    mode: source.mode || "resize",
+    mode: source.mode || "hires",
     target_width: targetWidth,
     target_height: targetHeight,
-    denoising_strength: clampNumber(source.denoising_strength, 0, 1, 0.35),
-    upscaler: source.upscaler || "Latent",
-    second_pass_steps: clampInteger(source.second_pass_steps, 1, 80, Math.max(8, Math.round(clampInteger(plan.steps, 1, 80, 8) * 0.5))),
+    denoising_strength: clampNumber(source.denoising_strength, 0, 1, 0.2),
+    upscaler: source.upscaler || "Lanczos",
+    second_pass_steps: clampInteger(source.second_pass_steps, 1, 80, Math.max(10, Math.round(clampInteger(plan.steps, 1, 80, 8) * 0.6))),
   };
 }
 

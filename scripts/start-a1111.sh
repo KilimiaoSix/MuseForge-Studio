@@ -19,7 +19,7 @@ TAMING_PATH="$ENGINE_PATH/repositories/taming-transformers"
 export HF_ENDPOINT
 
 if [[ ! -f "$WEBUI_SH" ]]; then
-  echo "A1111 WebUI is not installed. Run scripts/bootstrap-engines.sh first." >&2
+  echo "A1111 WebUI is not installed. Run scripts/bootstrap-engines.sh first or copy it to vendor/engines/stable-diffusion-webui." >&2
   exit 1
 fi
 

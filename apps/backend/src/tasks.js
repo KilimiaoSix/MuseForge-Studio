@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { normalizeGenerationPlan } from "@sd-agent-studio/shared";
 import {
   getGenerationProgress,
-  getBackendName,
   interruptGeneration,
   runGeneration,
+  getBackendName,
+  unloadA1111Model,
 } from "./engines.js";
 import {
+  getActiveProviderProfile,
+  getAppSettings,
   getTask,
   insertGeneration,
   insertTask,
@@ -14,6 +16,7 @@ import {
   listTasksByStatus,
   updateTask,
 } from "./db.js";
+import { stopLocalLlmModel } from "./local-llm.js";
 
 const runningTasks = new Map();
 const queuedTaskIds = [];
@@ -31,13 +34,12 @@ export function restoreInterruptedTasks() {
   }
 }
 
-export function createGenerationTask({ plan, backend = getBackendName(), parentTaskId = "" }) {
-  const normalizedPlan = normalizeGenerationPlan(plan);
+export function createGenerationTask({ plan, parentTaskId = "" }) {
   const task = insertTask({
     id: randomUUID(),
-    backend,
+    backend: getBackendName(),
     status: "queued",
-    plan: normalizedPlan,
+    plan,
     parentTaskId,
   });
   queuedTaskIds.push(task.id);
@@ -45,12 +47,11 @@ export function createGenerationTask({ plan, backend = getBackendName(), parentT
   return task;
 }
 
-export function retryGenerationTask(taskId) {
+export function retryGenerationTask(taskId, { preparePlan = (plan) => plan } = {}) {
   const source = getTask(taskId);
   if (!source) return null;
   return createGenerationTask({
-    plan: source.plan,
-    backend: source.backend,
+    plan: preparePlan(source.plan),
     parentTaskId: source.id,
   });
 }
@@ -74,7 +75,7 @@ export async function cancelGenerationTask(taskId) {
     updateTask(taskId, { status: "cancelling", progressLabel: "正在取消" });
     runningTasks.get(taskId)?.abortController?.abort();
     if (activeTaskId === taskId) {
-      await interruptGeneration(task.backend);
+      await interruptGeneration();
     }
     return getTask(taskId);
   }
@@ -120,11 +121,34 @@ async function runTask(task) {
   });
 
   const progressTimer = setInterval(() => {
-    void updateProgress(task.id, task.backend);
+    void updateProgress(task.id);
   }, 1000);
 
+  const runtimeSettings = getAppSettings();
+  const lowPerformanceEvents = [];
+
   try {
-    const result = await runGeneration(task.plan, task.backend);
+    if (runtimeSettings.lowPerformanceMode) {
+      updateTask(task.id, {
+        progress: 0.03,
+        progressLabel: "Low performance mode: unloading local LLM",
+      });
+      const activeProvider = getActiveProviderProfile();
+      if (activeProvider?.type === "local") {
+        lowPerformanceEvents.push(await stopLocalLlmModel(activeProvider.model));
+      }
+    }
+
+    const result = await runGeneration(task.plan);
+
+    if (runtimeSettings.lowPerformanceMode) {
+      updateTask(task.id, {
+        progress: 0.98,
+        progressLabel: "Low performance mode: unloading image model",
+      });
+      lowPerformanceEvents.push(await unloadImageModelSafe());
+    }
+
     clearInterval(progressTimer);
 
     const latest = getTask(task.id);
@@ -154,7 +178,7 @@ async function runTask(task) {
       status: "succeeded",
       progress: 1,
       progressLabel: `生成完成：${images.length} 张`,
-      result: sanitizeGenerationResult(result),
+      result: sanitizeGenerationResult({ ...result, lowPerformanceEvents }),
       completedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -179,8 +203,20 @@ function sanitizeGenerationResult(result = {}) {
     baseUrl: result.baseUrl,
     outputImages: result.outputImages || [],
     prompt_id: result.prompt_id,
-    comfyImages: result.images && !result.outputImages ? result.images : undefined,
+    lowPerformanceEvents: result.lowPerformanceEvents || [],
   };
+}
+
+async function unloadImageModelSafe() {
+  try {
+    return await unloadA1111Model();
+  } catch (error) {
+    return {
+      backend: getBackendName(),
+      unloaded: false,
+      error: error.message,
+    };
+  }
 }
 
 function applyResolvedSeed(plan, result = {}) {
@@ -203,12 +239,12 @@ function readSeedFromResult(result = {}) {
   return -1;
 }
 
-async function updateProgress(taskId, backend) {
+async function updateProgress(taskId) {
   const task = getTask(taskId);
   if (!task || task.status !== "running") return;
 
   try {
-    const progress = await getGenerationProgress(backend);
+    const progress = await getGenerationProgress();
     const state = progress.state || {};
     const samplingStep = Number(state.sampling_step || state.samplingStep || 0);
     const samplingSteps = Number(state.sampling_steps || state.samplingSteps || task.plan.steps || 0);

@@ -9,14 +9,14 @@
 ## Backend
 
 - `apps/backend/src/server.js` - Node HTTP API scaffold。
-- `apps/backend/src/engines.js` - ComfyUI / A1111 后端选择、状态、模型和生图调用。
+- `apps/backend/src/engines.js` - A1111 后端状态、模型和生图调用。
 - `apps/backend/examples/` - API 请求示例。
 - `docs/API.md` - 后端接口草案。
 
 ## Inference Engines
 
-- `engines/manifest.json` - ComfyUI / A1111 Git 仓库、端口、健康检查和模型目录配置。
-- `vendor/engines/.gitkeep` - 大后端克隆位置。实际 ComfyUI / A1111 目录不会提交。
+- `engines/manifest.json` - A1111 Git 仓库、端口、健康检查和模型目录配置。
+- `vendor/engines/.gitkeep` - 大后端克隆位置。实际 A1111 目录不会提交。
 - `scripts/bootstrap-engines.ps1` - 一键拉取并安装推理后端。
 - `scripts/start-dev.ps1` - 一键启动 Agent + UI + 默认推理后端。
 - `scripts/*.sh` - Linux/macOS 对应脚本。
@@ -50,6 +50,5 @@ bash scripts/start-dev.sh
 Start with:
 
 ```text
-Connect apps/ui-prototype to apps/backend /api/generate/plan,
-then wire /api/generate/run to a running Aki / AUTOMATIC1111 WebUI.
+A1111 is the only active inference backend. Continue by hardening img2img/inpaint and generation history workflows.
 ```

@@ -32,8 +32,6 @@ sd-agent-studio-product/
 - 调用 `packages/model-providers` 生成结构化方案。
 - 校验并补全方案。
 - 调用本地 Aki / SD WebUI API。
-- 调用本地 ComfyUI API。
-- 在 ComfyUI 和 A1111 WebUI 之间切换推理后端。
 - 扫描本地模型资源目录。
 - 管理任务队列与任务状态。
 - 为 LoRA 炼制生成数据处理和训练配置。
@@ -51,6 +49,14 @@ Provider 类型：
 
 Provider 输出统一为共享 schema，例如 `GenerationPlan`、`EditPlan`、`LoraTrainingPlan`。
 
+Provider 配置可以在 Web 设置页维护多配置档，保存到本地 SQLite。API Key 使用本机密钥文件加密保存，不在响应中明文返回。没有 Web 配置时，后端回退读取 `.env`。
+
+默认本地大模型链路：
+
+- Ollama
+- `gemma4:e4b`
+- `http://127.0.0.1:11434/v1/chat/completions`
+
 ## SD WebUI 调用
 
 后端可以通过 HTTP 调用本地 A1111 / Aki WebUI：
@@ -63,28 +69,6 @@ Provider 输出统一为共享 schema，例如 `GenerationPlan`、`EditPlan`、`
 
 第一版只提供客户端封装和 mock fallback，真实出图依赖用户本地 WebUI 已启动。
 
-## ComfyUI 调用
-
-ComfyUI 作为默认推理后端，通过 `INFERENCE_BACKEND=comfyui` 启用。
-
-第一版支持基础 txt2img 工作流：
-
-- CheckpointLoaderSimple
-- CLIPTextEncode
-- EmptyLatentImage
-- KSampler
-- VAEDecode
-- SaveImage
-
-后端调用流程：
-
-1. 把 `GenerationPlan` 转换成 ComfyUI workflow JSON。
-2. 调用 `POST /prompt`。
-3. 轮询 `GET /history/{prompt_id}`。
-4. 从 history 中提取 `/view` 图片 URL。
-
-ControlNet、LoRA、img2img、inpaint 在后续迭代通过扩展 workflow builder 实现。
-
 ## 引擎部署
 
 大后端源码不提交到项目仓库。使用：
@@ -93,7 +77,7 @@ ControlNet、LoRA、img2img、inpaint 在后续迭代通过扩展 workflow build
 powershell -ExecutionPolicy Bypass -File scripts/bootstrap-engines.ps1
 ```
 
-把 ComfyUI 和 A1111 克隆到：
+把 A1111 克隆到：
 
 ```text
 vendor/engines/

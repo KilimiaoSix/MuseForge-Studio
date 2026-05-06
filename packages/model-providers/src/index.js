@@ -5,6 +5,10 @@ export { ProviderTypes };
 export function createProvider(config = {}) {
   const type = config.type || process.env.AGENT_PROVIDER || ProviderTypes.OPENAI_COMPATIBLE;
 
+  if (type === ProviderTypes.MOCK || type === "mock") {
+    return new MockProvider();
+  }
+
   if (type === ProviderTypes.OPENAI || type === ProviderTypes.OPENAI_COMPATIBLE || type === ProviderTypes.LOCAL) {
     return new OpenAICompatibleProvider({
       type,
@@ -50,8 +54,8 @@ export class MockProvider {
       hires_fix: inferred.hires_fix,
       adetailer: false,
       rationale: checkpoint
-        ? `Mock Provider：已选择 ${checkpoint}。先用 ${inferred.width}x${inferred.height} 快速构图${inferred.target_width ? `，再通过 A1111 Hires resize 输出 ${inferred.target_width}x${inferred.target_height}` : ""}。`
-        : `Mock Provider：未检测到 checkpoint。先用 ${inferred.width}x${inferred.height} 快速构图${inferred.target_width ? `，再通过 A1111 Hires resize 输出 ${inferred.target_width}x${inferred.target_height}` : ""}。`,
+        ? `Mock Provider：已选择 ${checkpoint}。先用 ${inferred.width}x${inferred.height} 快速构图${inferred.target_width ? `，再通过 A1111 普通 resize 输出 ${inferred.target_width}x${inferred.target_height}` : ""}。`
+        : `Mock Provider：未检测到 checkpoint。先用 ${inferred.width}x${inferred.height} 快速构图${inferred.target_width ? `，再通过 A1111 普通 resize 输出 ${inferred.target_width}x${inferred.target_height}` : ""}。`,
     });
   }
 }
@@ -74,7 +78,7 @@ export class OpenAICompatibleProvider {
       temperature: 0.4,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: generationPlannerSystemPrompt },
+        { role: "system", content: plannerSystemPrompt },
         { role: "user", content: JSON.stringify({ userRequest, modelContext }) },
       ],
     };
@@ -134,7 +138,7 @@ export class AnthropicProvider {
         model: this.model,
         max_tokens: 1600,
         temperature: 0.4,
-        system: generationPlannerSystemPrompt,
+        system: plannerSystemPrompt,
         messages: [
           { role: "user", content: JSON.stringify({ userRequest, modelContext }) },
         ],
@@ -151,6 +155,38 @@ export class AnthropicProvider {
   }
 }
 
+const resourceCompatibilitySystemPrompt = `
+Hard resource rules:
+- Use only checkpoints, LoRA, ControlNet and samplers present in modelContext.
+- If modelContext.resourceProfiles is present, LoRA and ControlNet must be compatible with the chosen checkpoint baseType.
+- Do not use unknown LoRA or unknown ControlNet; they are blocked until annotated by the user.
+- Do not output VAE; the backend chooses checkpoint preferredVae automatically.
+- For SDXL/Pony checkpoints, prefer profile recommended base sizes: square 1024x1024, portrait 832x1216, landscape 1216x832.
+- For SD1.5 checkpoints, prefer profile recommended base sizes: square 512x512, portrait 512x768, landscape 768x512.
+- target_width/target_height means plain resize by default. In that case hires_fix must be false.
+- Only enable Hires Fix when the user explicitly asks for second-pass redraw, highres fix, or refinement; then use hires_fix {"enabled":true,"mode":"hires","denoising_strength":0.2,"upscaler":"Lanczos"}.
+- Never use Latent upscaler for plain resize.
+`;
+
+const promptAllInOneSystemPrompt = `
+Prompt writing rules:
+- When modelContext.promptTools.promptAllInOne.installed is true, write prompts in a prompt-all-in-one friendly tag workflow.
+- positive_prompt must be comma-separated English Stable Diffusion tags, not long prose sentences.
+- Organize positive_prompt tags in this order: subject, appearance, clothing/accessories, pose/composition, scene/background, lighting, style/quality, camera/detail.
+- Do not include group headings in positive_prompt; only output the tags themselves separated by ASCII commas.
+- negative_prompt must also be comma-separated English tags, grouped by quality problems, anatomy problems, artifacts, text/logo/watermark, and unwanted style.
+- If using LoRA, place its trigger words near the matching subject/style tags in positive_prompt, but never invent LoRA names or trigger words.
+- Keep prompts compact and editable: prefer short tag phrases such as "1girl", "silver hair", "rainy night", "cinematic lighting", "best quality".
+- Avoid Chinese punctuation inside positive_prompt and negative_prompt.
+- Treat modelContext.promptTagTool as the result of an internal tool call named prompt-all-in-one.tag_search.
+- modelContext.toolCalls/toolResults may contain the same result in tool-call format; treat toolResults[].output.candidates as authoritative retrieved SD tags.
+- If modelContext.promptTagTool.ok is true, prefer modelContext.promptTagTool.candidates[].name for SD prompt tags whenever they match the user request.
+- Use modelContext.promptTagTool.groups to understand which plugin groups are relevant, especially for SD1.5 tag conventions.
+- Do not copy translations into prompts; translations are only explanations. Use candidates[].name exactly as the English tag.
+- If the user asks for a concept and matching candidates exist, include the best matching candidate tags before falling back to your own SD knowledge.
+- If candidates conflict with available LoRA/checkpoint compatibility rules, resource compatibility rules still win.
+`;
+
 const generationPlannerSystemPrompt = `
 你是 SD Agent Studio 的生图方案规划器。
 把用户的中文自然语言需求转换为 Stable Diffusion WebUI 可执行的 JSON。
@@ -166,15 +202,21 @@ prompt 可以使用英文 tag，rationale 使用中文。
 width/height 永远表示模型舒适的基础生成尺寸，不表示最终输出大图尺寸。
 如果用户要求手机壁纸、大图、高清、4K、导出尺寸，或明确输入 768x1344、1024x1536 等尺寸，把最终尺寸写入 target_width/target_height，同时保持 width/height 为相同比例下更适合首轮生成的推荐尺寸。
 通用 SD1.5 友好基础尺寸：方图 512x512，竖图 512x768，横图 768x512；必要时可用接近比例的 64 倍数，但不要直接用大目标尺寸首轮生成。
-如果 target_width/target_height 与 width/height 不一致，hires_fix 必须是对象：{"enabled":true,"mode":"resize","target_width":目标宽,"target_height":目标高,"denoising_strength":0.35,"upscaler":"Latent","second_pass_steps":max(8, round(steps*0.5))}。
+SDXL/Pony 友好基础尺寸：方图 1024x1024，竖图 832x1216，横图 1216x832；优先使用 checkpoint profile 中的 recommendedSize。
+如果 target_width/target_height 与 width/height 不一致，默认是普通 resize，hires_fix 必须为 false；后端会使用 A1111 extras 普通 resize 输出目标尺寸。
+只有用户明确要求“二次重绘、高清修复、重新细化、Hires Fix”时，hires_fix 才能是对象：{"enabled":true,"mode":"hires","target_width":目标宽,"target_height":目标高,"denoising_strength":0.2,"upscaler":"Lanczos","second_pass_steps":max(10, round(steps*0.6))}。
 如果没有高清/目标尺寸需求，target_width/target_height 为 null，hires_fix=false。
 默认值只在用户没有提供用途、画幅、质量、数量或风格线索时兜底：width=512、height=512、target_width=null、target_height=null、steps=8、cfg_scale=5、sampler=Euler a、batch_size=1、seed=-1、hires_fix=false、adetailer=false。
 如果用户描述了用途或构图，例如手机壁纸、竖屏、头像、横幅、海报、全身、半身、近景、批量方案，你必须据此选择基础 width/height、目标 target_width/target_height、steps、cfg_scale、sampler、batch_size 和 seed。
 如果 modelContext 提供 samplers，sampler 必须从 samplers[].name 中选择，不要输出不存在的变体名。
 不要为了保守而忽略明确或隐含的画幅需求；rationale 必须解释为什么选择这些参数。
-rationale 必须说明：先按模型舒适尺寸快速构图，再按需要通过 A1111 resize + 高清修复到目标尺寸。
+rationale 必须说明：先按模型舒适尺寸快速构图，再按需要通过 A1111 普通 resize 到目标尺寸；只有明确要求二次重绘时才使用 Hires Fix。
 adetailer 由需求判断：只有用户明确要求脸部修复、精修或最终成片时才开启。
 `;
+
+const plannerSystemPrompt = `${resourceCompatibilitySystemPrompt}
+${promptAllInOneSystemPrompt}
+${generationPlannerSystemPrompt}`;
 
 function buildMockPrompt(userRequest = "") {
   return [
@@ -266,15 +308,7 @@ function targetFields(target, baseWidth, baseHeight, steps) {
   return {
     target_width: target.width,
     target_height: target.height,
-    hires_fix: {
-      enabled: true,
-      mode: "resize",
-      target_width: target.width,
-      target_height: target.height,
-      denoising_strength: 0.35,
-      upscaler: "Latent",
-      second_pass_steps: Math.max(8, Math.round(steps * 0.5)),
-    },
+    hires_fix: false,
   };
 }
 

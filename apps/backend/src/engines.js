@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,6 @@ const manifestPath = join(projectRoot, "engines", "manifest.json");
 const generationOutputDir = join(projectRoot, "outputs", "generations");
 
 export const InferenceBackends = Object.freeze({
-  COMFYUI: "comfyui",
   A1111: "a1111",
 });
 
@@ -17,56 +16,47 @@ export async function loadEngineManifest() {
   return JSON.parse(await readFile(manifestPath, "utf8"));
 }
 
-export function getBackendName(value = process.env.INFERENCE_BACKEND) {
-  const backend = String(value || InferenceBackends.COMFYUI).toLowerCase();
-  return backend === InferenceBackends.A1111 ? InferenceBackends.A1111 : InferenceBackends.COMFYUI;
+export function getBackendName() {
+  return InferenceBackends.A1111;
 }
 
 export async function getEngineStatus() {
   const manifest = await loadEngineManifest();
   const installRoot = resolve(projectRoot, manifest.installDir);
-  const engines = {};
-
-  for (const key of Object.keys(manifest.engines)) {
-    const engine = manifest.engines[key];
-    const path = join(installRoot, engine.directory);
-    const baseUrl = resolveEngineBaseUrl(key, engine);
-    const healthUrl = `${baseUrl}${engine.healthPath}`;
-    const health = await testHttp(healthUrl);
-
-    engines[key] = {
-      name: engine.name,
-      installed: existsSync(path),
-      path,
-      port: engine.port,
-      baseUrl,
-      healthPath: engine.healthPath,
-      running: health.ok,
-      health,
-      modelDirs: mapModelDirs(path, engine.modelDirs),
-    };
-  }
+  const engine = manifest.engines.a1111;
+  const path = join(installRoot, engine.directory);
+  const baseUrl = resolveEngineBaseUrl(engine);
+  const healthUrl = `${baseUrl}${engine.healthPath}`;
+  const health = await testHttp(healthUrl);
 
   return {
-    defaultBackend: getBackendName(),
-    engines,
+    defaultBackend: InferenceBackends.A1111,
+    engines: {
+      a1111: {
+        name: engine.name,
+        installed: existsSync(path),
+        path,
+        port: engine.port,
+        baseUrl,
+        healthPath: engine.healthPath,
+        running: health.ok,
+        health,
+        modelDirs: mapModelDirs(path, engine.modelDirs),
+        promptTools: detectPromptTools(path),
+      },
+    },
   };
 }
 
 export async function getEngineModels() {
-  const [status, comfyModels, a1111Models] = await Promise.all([
+  const [status, a1111Models] = await Promise.all([
     getEngineStatus(),
-    getComfyUiModels().catch((error) => ({ error: error.message, checkpoints: [] })),
     getA1111Models().catch((error) => ({ error: error.message, checkpoints: [] })),
   ]);
 
   return {
-    defaultBackend: getBackendName(),
+    defaultBackend: InferenceBackends.A1111,
     engines: {
-      comfyui: {
-        ...status.engines.comfyui,
-        models: comfyModels,
-      },
       a1111: {
         ...status.engines.a1111,
         models: a1111Models,
@@ -75,29 +65,42 @@ export async function getEngineModels() {
   };
 }
 
-export async function runGeneration(plan, backend = getBackendName()) {
-  if (backend === InferenceBackends.A1111) {
-    return runA1111Txt2Img(plan);
-  }
-
-  return runComfyUiTxt2Img(plan);
+export async function runGeneration(plan) {
+  return runA1111Txt2Img(plan);
 }
 
-export async function getGenerationProgress(backend = getBackendName()) {
-  if (backend !== InferenceBackends.A1111) {
-    return {
-      backend,
-      progress: 0,
-      etaRelative: null,
-      state: {},
-      currentImage: "",
-    };
+export async function unloadA1111Model() {
+  const baseUrl = trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || "http://127.0.0.1:7860");
+  const response = await fetch(`${baseUrl}/sdapi/v1/unload-checkpoint`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error(`A1111 model unload failed: ${response.status} ${await response.text()}`);
   }
 
+  return { backend: InferenceBackends.A1111, unloaded: true };
+}
+
+export async function reloadA1111Model() {
+  const baseUrl = trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || "http://127.0.0.1:7860");
+  await disableA1111KeepCheckpointInCpu(baseUrl).catch(() => {});
+  const response = await fetch(`${baseUrl}/sdapi/v1/reload-checkpoint`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error(`A1111 model reload failed: ${response.status} ${await response.text()}`);
+  }
+
+  return { backend: InferenceBackends.A1111, reloaded: true };
+}
+
+export async function getGenerationProgress() {
   const baseUrl = trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || "http://127.0.0.1:7860");
   const data = await fetchJson(`${baseUrl}/sdapi/v1/progress?skip_current_image=false`);
   return {
-    backend,
+    backend: InferenceBackends.A1111,
     baseUrl,
     progress: Number(data.progress || 0),
     etaRelative: data.eta_relative ?? null,
@@ -106,23 +109,22 @@ export async function getGenerationProgress(backend = getBackendName()) {
   };
 }
 
-export async function interruptGeneration(backend = getBackendName()) {
-  if (backend !== InferenceBackends.A1111) {
-    return { backend, cancelled: false, message: "Cancel is currently only implemented for A1111." };
-  }
-
+export async function interruptGeneration() {
   const baseUrl = trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || "http://127.0.0.1:7860");
   const response = await fetch(`${baseUrl}/sdapi/v1/interrupt`, { method: "POST" });
   if (!response.ok) {
     throw new Error(`A1111 interrupt failed: ${response.status} ${await response.text()}`);
   }
-  return { backend, cancelled: true };
+  return { backend: InferenceBackends.A1111, cancelled: true };
 }
 
 export async function runA1111Txt2Img(plan) {
   const baseUrl = trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || "http://127.0.0.1:7860");
   const hiresFix = resolveA1111HiresFix(plan);
   const enableHighRes = hiresFix.enabled;
+  const resizeTarget = resolveA1111ResizeTarget(plan);
+  const checkpoint = plan._runtime?.checkpoint || plan.checkpoint || "";
+  const vae = plan._runtime?.vae || "Automatic";
   const payload = {
     prompt: buildA1111Prompt(plan),
     negative_prompt: plan.negative_prompt,
@@ -133,7 +135,8 @@ export async function runA1111Txt2Img(plan) {
     cfg_scale: plan.cfg_scale,
     seed: plan.seed,
     batch_size: plan.batch_size,
-    override_settings: plan.checkpoint ? { sd_model_checkpoint: plan.checkpoint } : undefined,
+    override_settings: checkpoint ? { sd_model_checkpoint: checkpoint, sd_vae: vae } : undefined,
+    override_settings_restore_afterwards: false,
     enable_hr: enableHighRes,
     denoising_strength: enableHighRes ? hiresFix.denoising_strength : undefined,
     hr_resize_x: enableHighRes ? hiresFix.target_width : undefined,
@@ -142,18 +145,15 @@ export async function runA1111Txt2Img(plan) {
     hr_second_pass_steps: enableHighRes ? hiresFix.second_pass_steps : undefined,
   };
 
-  const response = await fetch(`${baseUrl}/sdapi/v1/txt2img`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    throw new Error(`A1111 txt2img failed: ${response.status} ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  const outputImages = await saveA1111Images(data.images || [], plan);
+  const data = await postA1111JsonWithRecovery(baseUrl, "/sdapi/v1/txt2img", payload, "txt2img");
+  const images = !enableHighRes && resizeTarget.enabled
+    ? await resizeA1111Images(baseUrl, data.images || [], resizeTarget)
+    : data.images || [];
+  const outputImages = await saveA1111Images(images, resizeTarget.enabled || enableHighRes ? {
+    ...plan,
+    target_width: resizeTarget.target_width || hiresFix.target_width,
+    target_height: resizeTarget.target_height || hiresFix.target_height,
+  } : plan);
 
   return {
     backend: InferenceBackends.A1111,
@@ -193,13 +193,14 @@ function formatWeight(value) {
 
 function resolveA1111HiresFix(plan = {}) {
   const source = typeof plan.hires_fix === "object" && plan.hires_fix ? plan.hires_fix : {};
+  const explicitlyEnabled = plan.hires_fix === true || (source.enabled === true && source.mode !== "resize");
   const width = Number(plan.width || 512);
   const height = Number(plan.height || 512);
   const targetWidth = Number(plan.target_width || source.target_width || 0);
   const targetHeight = Number(plan.target_height || source.target_height || 0);
   const targetDiffers = targetWidth > 0 && targetHeight > 0 && (targetWidth !== width || targetHeight !== height);
 
-  if (!targetDiffers) {
+  if (!explicitlyEnabled || !targetDiffers) {
     return { enabled: false };
   }
 
@@ -207,10 +208,102 @@ function resolveA1111HiresFix(plan = {}) {
     enabled: true,
     target_width: targetWidth,
     target_height: targetHeight,
-    denoising_strength: finiteNumber(source.denoising_strength, 0.35),
-    upscaler: source.upscaler || "Latent",
-    second_pass_steps: Math.max(8, Math.round(finiteNumber(source.second_pass_steps, Math.round(Number(plan.steps || 8) * 0.5)))),
+    denoising_strength: finiteNumber(source.denoising_strength, 0.2),
+    upscaler: source.upscaler || "Lanczos",
+    second_pass_steps: Math.max(10, Math.round(finiteNumber(source.second_pass_steps, Math.round(Number(plan.steps || 8) * 0.6)))),
   };
+}
+
+function resolveA1111ResizeTarget(plan = {}) {
+  const width = Number(plan.width || 512);
+  const height = Number(plan.height || 512);
+  const targetWidth = Number(plan.target_width || plan.hires_fix?.target_width || 0);
+  const targetHeight = Number(plan.target_height || plan.hires_fix?.target_height || 0);
+  const targetDiffers = targetWidth > 0 && targetHeight > 0 && (targetWidth !== width || targetHeight !== height);
+  return {
+    enabled: targetDiffers,
+    target_width: targetDiffers ? targetWidth : 0,
+    target_height: targetDiffers ? targetHeight : 0,
+  };
+}
+
+async function resizeA1111Images(baseUrl, images, target) {
+  const resized = [];
+  for (const image of images) {
+    const data = await postA1111JsonWithRecovery(baseUrl, "/sdapi/v1/extra-single-image", {
+      resize_mode: 1,
+      show_extras_results: true,
+      gfpgan_visibility: 0,
+      codeformer_visibility: 0,
+      codeformer_weight: 0,
+      upscaling_resize: 1,
+      upscaling_resize_w: target.target_width,
+      upscaling_resize_h: target.target_height,
+      upscaling_crop: false,
+      upscaler_1: "Lanczos",
+      upscaler_2: "None",
+      extras_upscaler_2_visibility: 0,
+      upscale_first: false,
+      image: stripDataUrlPrefix(image),
+    }, "resize");
+    resized.push(data.image || image);
+  }
+  return resized;
+}
+
+async function postA1111JsonWithRecovery(baseUrl, path, payload, action) {
+  const first = await postA1111Json(baseUrl, path, payload);
+  if (first.ok) return first.data;
+  if (!isA1111DeviceMismatchError(first.body)) {
+    throw new Error(formatA1111Error(action, first));
+  }
+
+  await recoverA1111DeviceState(baseUrl);
+  const retry = await postA1111Json(baseUrl, path, payload);
+  if (retry.ok) return retry.data;
+
+  const message = isA1111DeviceMismatchError(retry.body)
+    ? `${formatA1111Error(action, retry)}. 已尝试自动重载 checkpoint 但仍失败，请在 A1111 中重新加载模型或重启 WebUI。`
+    : formatA1111Error(action, retry);
+  throw new Error(message);
+}
+
+async function postA1111Json(baseUrl, path, payload) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    return { ok: false, status: response.status, body };
+  }
+  return { ok: true, status: response.status, body, data: body ? JSON.parse(body) : {} };
+}
+
+async function recoverA1111DeviceState(baseUrl) {
+  await disableA1111KeepCheckpointInCpu(baseUrl).catch(() => {});
+  const response = await fetch(`${baseUrl}/sdapi/v1/reload-checkpoint`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`A1111 自动恢复失败: ${response.status} ${await response.text()}`);
+  }
+}
+
+async function disableA1111KeepCheckpointInCpu(baseUrl) {
+  await fetch(`${baseUrl}/sdapi/v1/options`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sd_checkpoints_keep_in_cpu: false }),
+  });
+}
+
+function isA1111DeviceMismatchError(body = "") {
+  return /Expected all tensors to be on the same device/i.test(body)
+    || /at least two devices,\s*cpu and cuda/i.test(body);
+}
+
+function formatA1111Error(action, response) {
+  return `A1111 ${action} failed: ${response.status} ${response.body}`;
 }
 
 function finiteNumber(value, fallback) {
@@ -241,171 +334,11 @@ async function saveA1111Images(images, plan) {
   return saved;
 }
 
-export async function runComfyUiTxt2Img(plan) {
-  const baseUrl = trimTrailingSlash(process.env.COMFYUI_BASE_URL || "http://127.0.0.1:8188");
-  const checkpoint = await resolveComfyCheckpoint(plan);
-  const workflow = buildComfyTxt2ImgWorkflow({ ...plan, checkpoint });
-  const clientId = randomUUID();
-
-  const promptResponse = await fetch(`${baseUrl}/prompt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: workflow, client_id: clientId }),
-  });
-
-  if (!promptResponse.ok) {
-    throw new Error(`ComfyUI prompt submit failed: ${promptResponse.status} ${await promptResponse.text()}`);
-  }
-
-  const promptResult = await promptResponse.json();
-  const promptId = promptResult.prompt_id;
-  const history = await waitForComfyHistory(baseUrl, promptId);
-
-  return {
-    backend: InferenceBackends.COMFYUI,
-    baseUrl,
-    prompt_id: promptId,
-    workflow,
-    images: extractComfyImages(baseUrl, history[promptId]),
-    history: history[promptId],
-  };
-}
-
-export function buildComfyTxt2ImgWorkflow(plan) {
-  const checkpoint = plan.checkpoint || "model.safetensors";
-  const seed = Number(plan.seed) >= 0 ? Number(plan.seed) : Math.floor(Math.random() * 2147483647);
-  const batchSize = Math.max(1, Number(plan.batch_size || 1));
-
-  return {
-    "1": {
-      class_type: "CheckpointLoaderSimple",
-      inputs: {
-        ckpt_name: checkpoint,
-      },
-    },
-    "2": {
-      class_type: "CLIPTextEncode",
-      inputs: {
-        text: plan.positive_prompt,
-        clip: ["1", 1],
-      },
-    },
-    "3": {
-      class_type: "CLIPTextEncode",
-      inputs: {
-        text: plan.negative_prompt,
-        clip: ["1", 1],
-      },
-    },
-    "4": {
-      class_type: "EmptyLatentImage",
-      inputs: {
-        width: plan.width,
-        height: plan.height,
-        batch_size: batchSize,
-      },
-    },
-    "5": {
-      class_type: "KSampler",
-      inputs: {
-        seed,
-        steps: plan.steps,
-        cfg: plan.cfg_scale,
-        sampler_name: mapComfySampler(plan.sampler),
-        scheduler: "normal",
-        denoise: 1,
-        model: ["1", 0],
-        positive: ["2", 0],
-        negative: ["3", 0],
-        latent_image: ["4", 0],
-      },
-    },
-    "6": {
-      class_type: "VAEDecode",
-      inputs: {
-        samples: ["5", 0],
-        vae: ["1", 2],
-      },
-    },
-    "7": {
-      class_type: "SaveImage",
-      inputs: {
-        filename_prefix: "sd_agent_studio",
-        images: ["6", 0],
-      },
-    },
-  };
-}
-
-async function resolveComfyCheckpoint(plan) {
-  if (plan.checkpoint) return plan.checkpoint;
-
-  const models = await getComfyUiModels().catch(() => ({ checkpoints: [] }));
-  const first = models.checkpoints?.[0]?.name;
-  if (!first) {
-    throw new Error("ComfyUI checkpoint not found. Put a .safetensors or .ckpt file in ComfyUI/models/checkpoints, or set plan.checkpoint.");
-  }
-  return first;
-}
-
-async function waitForComfyHistory(baseUrl, promptId) {
-  const timeoutMs = Number(process.env.COMFYUI_TIMEOUT_MS || 300000);
-  const started = Date.now();
-
-  while (Date.now() - started < timeoutMs) {
-    const response = await fetch(`${baseUrl}/history/${promptId}`);
-    if (response.ok) {
-      const history = await response.json();
-      if (history[promptId]) return history;
-    }
-    await sleep(1000);
-  }
-
-  throw new Error(`ComfyUI generation timed out after ${timeoutMs}ms`);
-}
-
-function extractComfyImages(baseUrl, promptHistory) {
-  const outputs = promptHistory?.outputs || {};
-  const images = [];
-
-  for (const output of Object.values(outputs)) {
-    for (const image of output.images || []) {
-      const params = new URLSearchParams({
-        filename: image.filename,
-        subfolder: image.subfolder || "",
-        type: image.type || "output",
-      });
-      images.push({
-        filename: image.filename,
-        subfolder: image.subfolder || "",
-        type: image.type || "output",
-        url: `${baseUrl}/view?${params.toString()}`,
-      });
-    }
-  }
-
-  return images;
-}
-
-async function getComfyUiModels() {
-  const manifest = await loadEngineManifest();
-  const engine = manifest.engines.comfyui;
-  const path = join(resolve(projectRoot, manifest.installDir), engine.directory);
-  const baseUrl = resolveEngineBaseUrl("comfyui", engine);
-  const objectInfo = await fetchJson(`${baseUrl}/object_info`).catch(() => null);
-  const loader = objectInfo?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || [];
-  const filesystemModels = await scanFiles(join(path, engine.modelDirs.checkpoints), [".safetensors", ".ckpt"]);
-
-  return {
-    checkpoints: loader.length ? loader.map((name) => ({ name, source: "object_info" })) : filesystemModels,
-  };
-}
-
 async function getA1111Models() {
   const manifest = await loadEngineManifest();
   const engine = manifest.engines.a1111;
   const path = join(resolve(projectRoot, manifest.installDir), engine.directory);
-  const baseUrl = resolveEngineBaseUrl("a1111", engine);
+  const baseUrl = resolveEngineBaseUrl(engine);
   const [apiModels, apiLoras, apiSamplers, apiOptions] = await Promise.all([
     fetchJson(`${baseUrl}/sdapi/v1/sd-models`).catch(() => null),
     fetchJson(`${baseUrl}/sdapi/v1/loras`).catch(() => null),
@@ -457,6 +390,38 @@ function mapModelDirs(enginePath, dirs) {
   return result;
 }
 
+function detectPromptTools(webuiRoot) {
+  const promptAllInOnePath = join(webuiRoot, "extensions", "sd-webui-prompt-all-in-one");
+  const groupTagsPath = join(promptAllInOnePath, "group_tags");
+  const installed = existsSync(promptAllInOnePath);
+  return {
+    promptAllInOne: {
+      installed,
+      path: installed ? promptAllInOnePath : "",
+      groupTagsPath: existsSync(groupTagsPath) ? groupTagsPath : "",
+      groupTagFiles: countFiles(groupTagsPath, [".yaml", ".yml"]),
+      capabilities: [
+        "comma_tag_prompt",
+        "group_tags",
+        "tag_formatting",
+        "lora_trigger_highlight",
+        "negative_prompt_groups",
+      ],
+    },
+  };
+}
+
+function countFiles(dir, extensions = []) {
+  try {
+    if (!existsSync(dir)) return 0;
+    return readdirSync(dir)
+      .filter((entry) => extensions.includes(extname(entry).toLowerCase()))
+      .length;
+  } catch {
+    return 0;
+  }
+}
+
 async function scanFiles(dir, allowedExtensions) {
   try {
     const entries = await readdir(dir);
@@ -474,24 +439,8 @@ async function scanFiles(dir, allowedExtensions) {
   }
 }
 
-function resolveEngineBaseUrl(key, engine) {
-  if (key === "comfyui") return trimTrailingSlash(process.env.COMFYUI_BASE_URL || engine.baseUrl);
-  if (key === "a1111") return trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || engine.baseUrl);
-  return trimTrailingSlash(engine.baseUrl);
-}
-
-function mapComfySampler(sampler = "") {
-  const value = sampler.toLowerCase();
-  if (value.includes("euler a")) return "euler_ancestral";
-  if (value.includes("euler")) return "euler";
-  if (value.includes("dpm++ 2m")) return "dpmpp_2m";
-  if (value.includes("dpm++ sde")) return "dpmpp_sde";
-  if (value.includes("ddim")) return "ddim";
-  return "dpmpp_2m";
-}
-
-function sleep(ms) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+function resolveEngineBaseUrl(engine) {
+  return trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || engine.baseUrl);
 }
 
 function trimTrailingSlash(value) {
