@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const dataDir = join(projectRoot, "data");
 const pullTasksPath = join(projectRoot, "data", "local-llm-pulls.json");
+const installTaskPath = join(projectRoot, "data", "local-llm-install.json");
 mkdirSync(dataDir, { recursive: true });
 const pullTasks = loadPullTasks();
+let installTask = loadInstallTask();
 
 export const localGemmaProvider = Object.freeze({
   name: "Local Gemma 4 E4B",
@@ -41,6 +43,20 @@ export async function getLocalLlmStatus() {
     installedModels,
     error: command.ok || serviceOnline ? "" : command.error,
   };
+}
+
+export function getLocalLlmInstallTask() {
+  return installTask ? sanitizeInstallTask(installTask) : null;
+}
+
+export async function installLocalLlmRuntime() {
+  if (installTask && ["queued", "running"].includes(installTask.status)) {
+    return { ok: true, task: sanitizeInstallTask(installTask) };
+  }
+
+  installTask = createInstallTask();
+  void runInstallTask(installTask.id);
+  return { ok: true, task: sanitizeInstallTask(installTask) };
 }
 
 export async function pullGemmaModel() {
@@ -229,12 +245,14 @@ export function resolveOllamaCommand() {
   const candidates = [
     process.env.OLLAMA_EXE,
     "ollama",
+    "/opt/homebrew/bin/ollama",
+    "/usr/local/bin/ollama",
     process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Programs\\Ollama\\ollama.exe` : "",
     process.env.ProgramFiles ? `${process.env.ProgramFiles}\\Ollama\\ollama.exe` : "",
   ].filter(Boolean);
 
   for (const candidate of candidates) {
-    if (candidate === "ollama") return candidate;
+    if (candidate === "ollama" && isCommandAvailable(candidate)) return candidate;
     try {
       if (existsSync(candidate)) return candidate;
     } catch {
@@ -243,6 +261,23 @@ export function resolveOllamaCommand() {
   }
 
   return "";
+}
+
+function isCommandAvailable(command) {
+  const pathValue = process.env.PATH || "";
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+    : [""];
+  for (const dir of pathValue.split(process.platform === "win32" ? ";" : ":").filter(Boolean)) {
+    for (const extension of extensions) {
+      try {
+        if (existsSync(join(dir, `${command}${extension}`))) return true;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return false;
 }
 
 async function fetchJsonSafe(url) {
@@ -269,6 +304,271 @@ function runCommand(command, args = [], { timeoutMs = 10000 } = {}) {
       resolveRun({ ok: false, stdout: "", stderr: "", error: error.message });
     });
   });
+}
+
+function createInstallTask() {
+  const now = new Date().toISOString();
+  const task = {
+    id: randomUUID(),
+    status: "queued",
+    progress: 0,
+    progressLabel: "等待安装",
+    statusText: "queued",
+    platform: process.platform,
+    installMethod: "",
+    error: "",
+    helpUrl: "",
+    logs: [],
+    createdAt: now,
+    startedAt: "",
+    completedAt: "",
+    updatedAt: now,
+  };
+  saveInstallTask(task);
+  return task;
+}
+
+async function runInstallTask(id) {
+  if (!installTask || installTask.id !== id) return;
+
+  updateInstallTask({
+    status: "running",
+    progress: 4,
+    progressLabel: "检查 Ollama",
+    statusText: "checking",
+    startedAt: new Date().toISOString(),
+  });
+
+  try {
+    if (await isOllamaServiceOnline()) {
+      updateInstallTask({
+        status: "succeeded",
+        progress: 100,
+        progressLabel: "Ollama 服务已在线",
+        statusText: "online",
+        installMethod: "existing-service",
+        completedAt: new Date().toISOString(),
+        log: "Ollama API is already responding.",
+      });
+      return;
+    }
+
+    let command = resolveOllamaCommand();
+    if (command) {
+      updateInstallTask({
+        progress: 28,
+        progressLabel: "Ollama 已安装，正在启动服务",
+        statusText: "starting",
+        installMethod: "existing-command",
+        log: `Found Ollama command: ${command}`,
+      });
+    } else {
+      await installOllamaForPlatform();
+      command = resolveOllamaCommand();
+      if (!command) {
+        throw installError("Ollama installed, but the command was not found on PATH. Restart the terminal or install from https://ollama.com/download.", "https://ollama.com/download");
+      }
+    }
+
+    await startOllamaService(command);
+    updateInstallTask({
+      status: "succeeded",
+      progress: 100,
+      progressLabel: "Ollama 已安装并启动",
+      statusText: "success",
+      completedAt: new Date().toISOString(),
+      log: "Ollama API is ready at http://127.0.0.1:11434.",
+    });
+  } catch (error) {
+    updateInstallTask({
+      status: "failed",
+      progressLabel: "安装失败",
+      statusText: "failed",
+      error: error.message,
+      helpUrl: error.helpUrl || manualInstallUrl(),
+      completedAt: new Date().toISOString(),
+      log: error.message,
+    });
+  }
+}
+
+async function installOllamaForPlatform() {
+  if (process.platform === "darwin") {
+    if (!isCommandAvailable("brew")) {
+      throw installError("Homebrew is not installed. Install Ollama manually from https://ollama.com/download/mac, or install Homebrew and retry.", "https://ollama.com/download/mac");
+    }
+    updateInstallTask({
+      progress: 18,
+      progressLabel: "使用 Homebrew 安装 Ollama",
+      statusText: "brew install ollama",
+      installMethod: "homebrew",
+      log: "Running: brew install ollama",
+    });
+    const result = await runCommand("brew", ["install", "ollama"], { timeoutMs: 1000 * 60 * 20 });
+    appendInstallOutput(result.stdout);
+    appendInstallOutput(result.stderr);
+    if (!result.ok) throw installError(result.error || result.stderr || "brew install ollama failed.", "https://ollama.com/download/mac");
+    updateInstallTask({ progress: 62, progressLabel: "Homebrew 安装完成", statusText: "installed" });
+    return;
+  }
+
+  if (process.platform === "win32") {
+    if (!isCommandAvailable("winget")) {
+      throw installError("winget is not available. Install Ollama manually from https://ollama.com/download/windows, then retry.", "https://ollama.com/download/windows");
+    }
+    updateInstallTask({
+      progress: 18,
+      progressLabel: "使用 winget 安装 Ollama",
+      statusText: "winget install Ollama.Ollama",
+      installMethod: "winget",
+      log: "Running: winget install --id Ollama.Ollama",
+    });
+    const result = await runCommand("winget", [
+      "install",
+      "--id",
+      "Ollama.Ollama",
+      "--source",
+      "winget",
+      "--accept-package-agreements",
+      "--accept-source-agreements",
+    ], { timeoutMs: 1000 * 60 * 20 });
+    appendInstallOutput(result.stdout);
+    appendInstallOutput(result.stderr);
+    if (!result.ok) throw installError(result.error || result.stderr || "winget install Ollama.Ollama failed.", "https://ollama.com/download/windows");
+    updateInstallTask({ progress: 62, progressLabel: "winget 安装完成", statusText: "installed" });
+    return;
+  }
+
+  throw installError("This one-click installer currently supports macOS and Windows only. Install Ollama manually from https://ollama.com/download.", "https://ollama.com/download");
+}
+
+async function startOllamaService(command) {
+  if (await isOllamaServiceOnline()) return;
+  updateInstallTask({
+    progress: Math.max(Number(installTask?.progress || 0), 72),
+    progressLabel: "启动 Ollama 服务",
+    statusText: "ollama serve",
+    log: `Starting: ${command} serve`,
+  });
+
+  try {
+    const child = spawn(command, ["serve"], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+  } catch (error) {
+    throw installError(`Failed to start Ollama service: ${error.message}`, manualInstallUrl());
+  }
+
+  const ready = await waitForOllamaService();
+  if (!ready) {
+    throw installError("Ollama service did not respond at http://127.0.0.1:11434 within 45 seconds.", manualInstallUrl());
+  }
+}
+
+async function isOllamaServiceOnline() {
+  return Boolean(await fetchJsonSafe("http://127.0.0.1:11434/api/version"));
+}
+
+async function waitForOllamaService({ timeoutMs = 45000, intervalMs = 1500 } = {}) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await isOllamaServiceOnline()) return true;
+    const elapsed = Date.now() - started;
+    const progress = 72 + Math.min(22, Math.round((elapsed / timeoutMs) * 22));
+    updateInstallTask({
+      progress,
+      progressLabel: "等待 Ollama 服务响应",
+      statusText: "waiting",
+    });
+    await sleep(intervalMs);
+  }
+  return false;
+}
+
+function updateInstallTask(patch = {}) {
+  if (!installTask) return null;
+  const logs = [...(installTask.logs || [])];
+  if (patch.log && logs[logs.length - 1] !== patch.log) logs.push(patch.log);
+  installTask = {
+    ...installTask,
+    ...Object.fromEntries(Object.entries(patch).filter(([key, value]) => key !== "log" && value !== undefined)),
+    logs: logs.slice(-30),
+    updatedAt: new Date().toISOString(),
+  };
+  saveInstallTask(installTask);
+  return sanitizeInstallTask(installTask);
+}
+
+function appendInstallOutput(output = "") {
+  const lines = String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines.slice(-8)) updateInstallTask({ log: line, statusText: line });
+}
+
+function sanitizeInstallTask(task = {}) {
+  return {
+    id: task.id,
+    status: task.status,
+    progress: task.progress,
+    progressLabel: task.progressLabel,
+    statusText: task.statusText,
+    platform: task.platform,
+    installMethod: task.installMethod,
+    error: task.error,
+    helpUrl: task.helpUrl,
+    logs: task.logs || [],
+    createdAt: task.createdAt,
+    startedAt: task.startedAt,
+    completedAt: task.completedAt,
+    updatedAt: task.updatedAt,
+  };
+}
+
+function loadInstallTask() {
+  try {
+    const parsed = JSON.parse(readFileSync(installTaskPath, "utf8"));
+    return normalizeLoadedInstallTask(parsed?.task || parsed);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeLoadedInstallTask(task = {}) {
+  if (!task.id) return null;
+  const wasRunning = ["queued", "running"].includes(task.status);
+  return {
+    ...task,
+    status: wasRunning ? "failed" : task.status || "failed",
+    error: wasRunning ? "Backend restarted while installing Ollama. Please start the install again." : task.error || "",
+    progressLabel: wasRunning ? "安装中断" : task.progressLabel || "",
+    completedAt: task.completedAt || (wasRunning ? new Date().toISOString() : ""),
+  };
+}
+
+function saveInstallTask(task) {
+  try {
+    writeFileSync(installTaskPath, JSON.stringify({ task: sanitizeInstallTask(task) }, null, 2));
+  } catch {
+    // Installer status is best-effort; the running task remains available in memory.
+  }
+}
+
+function installError(message, helpUrl = "") {
+  const error = new Error(message);
+  error.helpUrl = helpUrl;
+  return error;
+}
+
+function manualInstallUrl() {
+  if (process.platform === "darwin") return "https://ollama.com/download/mac";
+  if (process.platform === "win32") return "https://ollama.com/download/windows";
+  return "https://ollama.com/download";
+}
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
 function createPullTask(model, preflight) {

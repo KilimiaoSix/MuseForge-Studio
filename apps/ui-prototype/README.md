@@ -1,6 +1,6 @@
-# UI Prototype
+# MuseForge UI Prototype
 
-React/Vite front-end for SD Agent Studio. The generate screen is wired to the local backend and A1111 WebUI.
+React/Vite front-end for MuseForge Studio. The current flow is intentionally simple: natural-language request, tag-assisted plan, user confirmation, single A1111 txt2img generation, and result review.
 
 Open:
 
@@ -12,6 +12,7 @@ Screens:
 
 - `?screen=overview`
 - `?screen=generate`
+- `?screen=assist`
 - `?screen=edit`
 - `?screen=lora`
 - `?screen=models`

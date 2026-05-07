@@ -1,72 +1,64 @@
-# SD Agent Studio
+# MuseForge Studio
 
-这是一个方便后续 vibe coding 的产品工程包：包含需求文档、高保真 UI 原型、后端 API 脚手架、模型 Provider 适配层和共享协议。仓库不包含模型权重和真实 API Key。
+MuseForge Studio 是面向二次元创作者的本地优先创作客户端。它不替代 A1111 WebUI、Aki WebUI 或 ComfyUI，而是在这些引擎之上提供更适合产粮的提示词辅助、资源索引、配方管理、批量试验、资产沉淀和任务编排。
 
-## 目录
+当前版本重点保持简单稳定：
+
+- 使用 A1111 / Aki WebUI 执行单次 txt2img。
+- 使用本地或 OpenAI-compatible LLM 生成 tag prompt 和基础参数。
+- 保留 prompt-all-in-one 标签搜索能力。
+- 不默认启用 Hires Fix、Extras upscale、ADetailer、视觉评分或多轮自动重试。
+
+## 当前状态
+
+已具备：
+
+- React/Vite UI 原型。
+- Node 后端 API。
+- A1111 状态检查、模型扫描和 txt2img 调用。
+- prompt tag 搜索和轻量生图规划。
+- 任务队列、取消、重试和生成结果保存。
+- Provider 配置和 Ollama 本地模型管理。
+- checkpoint、LoRA、VAE、ControlNet、sampler 资源索引。
+- ControlNet 与 LoRA 训练相关雏形接口。
+
+下一阶段重点：
+
+- Recipe 保存与复用。
+- 批量抽卡和 seed 策略。
+- 画廊筛选、收藏、淘汰、备注。
+- 从生成结果恢复参数。
+- 工作台围绕 Recipe 和资产重组。
+
+## 文档
+
+- [产品计划](docs/PRD-V1.md)
+- [架构说明](docs/ARCHITECTURE.md)
+- [Backend API](docs/API.md)
+- [A1111 引擎部署](docs/ENGINE_SETUP.md)
+- [项目地图](PROJECT_MAP.md)
+
+## 项目结构
 
 ```text
 apps/
-  backend/        后端 API 服务，负责任务编排、A1111 WebUI 调用、模型扫描
-  ui-prototype/   React/Vite UI 原型
+  backend/          本地 API 服务，负责资源、Provider、任务和 A1111 调用
+  ui-prototype/     React/Vite 前端原型
 packages/
-  model-providers/ OpenAI、OpenAI-compatible、本地模型、Claude 类 Provider
-  shared/          共享类型、默认值、示例 schema
-docs/
-  PRD-V1.md
-  ARCHITECTURE.md
-  VIBE_CODING_HANDOFF.md
-screens/          7 张 UI 产品图
-tools/            资产生成和截图导出脚本
+  model-providers/  LLM Provider 适配层
+  shared/           共享 schema、默认值和归一化逻辑
+docs/               产品、架构、API 和引擎部署资料
+scripts/            开发、检查、A1111 和 Ollama 脚本
 ```
 
-## 快速查看
+仓库不包含模型权重、WebUI 大包源码、真实 API Key 或用户生成图。
 
-PRD：
-
-`docs/PRD-V1.md`
-
-UI 原型：
-
-`apps/ui-prototype/prototype/index.html`
-
-兼容入口：
-
-`prototype/index.html`
-
-产品截图：
-
-`screens/`
-
-## 开发入口
+## 本地运行
 
 安装依赖：
 
 ```bash
 npm install
-```
-
-一键拉取 A1111 后端：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/bootstrap-engines.ps1
-```
-
-Linux / macOS：
-
-```bash
-bash scripts/bootstrap-engines.sh
-```
-
-一键启动 A1111、Agent backend 和 UI：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start-dev.ps1
-```
-
-Linux / macOS：
-
-```bash
-bash scripts/start-dev.sh
 ```
 
 启动后端：
@@ -75,65 +67,76 @@ bash scripts/start-dev.sh
 npm run dev:backend
 ```
 
-启动 UI 原型静态服务：
+启动 UI：
 
 ```bash
 npm run dev:ui
 ```
 
-部署并验证本地 Gemma 4 E4B：
+默认地址：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/setup-gemma4-e4b.ps1
-```
+- UI：`http://127.0.0.1:5177`
+- Backend：`http://127.0.0.1:8787`
+- A1111：`http://127.0.0.1:7860`
 
-脚本会检查/安装 Ollama，拉取 `gemma4:e4b`，并验证 Ollama 的 OpenAI-compatible `/v1/chat/completions` 接口。
-
-导出产品图：
+一键启动开发栈：
 
 ```bash
-npm run export:screens
+bash scripts/start-dev.sh
 ```
 
-## 环境变量
+Windows：
 
-复制 `.env.example` 为 `.env`，按需填写：
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-dev.ps1
+```
 
-- `SD_WEBUI_BASE_URL`
-- `A1111_BASE_URL`
-- `ENGINE_INSTALL_DIR`
-- `AGENT_PROVIDER`
-- `AGENT_BASE_URL`
-- `AGENT_MODEL`
-- `AGENT_API_KEY`
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `KOHYA_SS_PATH`
-- `SD_SCRIPTS_PATH`
+## A1111 / Aki WebUI
 
-## 不要提交
+如果你已经有可用 WebUI，只需要在 `.env` 中设置：
 
-- 模型权重：`.safetensors`、`.ckpt`、`.pt`、`.pth`、`.gguf`
-- `.env`
-- 用户生成图
-- WebUI 大包源码
-- API Key
+```text
+A1111_BASE_URL=http://127.0.0.1:7860
+SD_WEBUI_BASE_URL=http://127.0.0.1:7860
+```
+
+也可以使用脚本安装到 `vendor/engines/stable-diffusion-webui`：
+
+```bash
+bash scripts/bootstrap-engines.sh
+```
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/bootstrap-engines.ps1
+```
+
+更多说明见 [A1111 引擎部署](docs/ENGINE_SETUP.md)。
 
 ## Provider 配置
 
-Web 设置页支持新增、编辑、启用、测试和删除多个大语言模型 Provider。配置保存在本机 `data/museforge.sqlite`，API Key 使用 `data/provider-secret.key` 加密保存，页面和 API 不回显明文。
-
-没有 Web 配置时，后端会回退读取 `.env`。默认本地 Provider：
+复制 `.env.example` 为 `.env`，按需填写：
 
 ```text
 AGENT_PROVIDER=local
 AGENT_BASE_URL=http://127.0.0.1:11434/v1
 AGENT_MODEL=gemma4:e4b
+AGENT_API_KEY=
 ```
 
+Web 设置页也支持新增、启用、测试和删除 Provider。配置保存在本机 SQLite，API Key 会本地加密保存，接口不会回显明文。
 
-## Low Performance / VRAM-Saving Mode
+## 检查
 
-Provider Settings includes a low-performance mode. Enable it when local Ollama models and A1111 checkpoints compete for VRAM.
+```bash
+npm run check
+```
 
-With this mode enabled, the backend stops the active local Ollama model before image generation and unloads the A1111 checkpoint after the task finishes. The next request reloads the needed model on demand, so speed will be noticeably slower.
+## 不要提交
+
+- `.env`
+- 模型权重：`.safetensors`、`.ckpt`、`.pt`、`.pth`、`.gguf`
+- 用户生成图
+- WebUI 大包源码
+- API Key

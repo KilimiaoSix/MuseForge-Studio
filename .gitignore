@@ -16,6 +16,7 @@ tmp/
 outputs/
 uploads/
 vendor/engines/ComfyUI/
+vendor/engines/kohya_ss/
 vendor/engines/stable-diffusion-webui
 vendor/engines/stable-diffusion-webui/
 vendor/engines/**/.venv/

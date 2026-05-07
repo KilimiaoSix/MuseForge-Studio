@@ -43,6 +43,8 @@ export function createGenerationPlan(overrides = {}) {
     seed: -1,
     batch_size: 1,
     hires_fix: false,
+    refine: false,
+    upscale: false,
     adetailer: false,
     rationale: "",
     ...overrides,
@@ -107,11 +109,25 @@ export function normalizeGenerationPlan(plan = {}) {
   normalized.seed = Number.isFinite(Number(normalized.seed)) ? Number(normalized.seed) : -1;
   normalized.lora = normalizeLoras(normalized.lora);
   normalized.controlnet = Array.isArray(normalized.controlnet) ? normalized.controlnet : [];
+  normalized.refine = normalizeRefine(normalized);
+  normalized.upscale = normalizeUpscale(normalized);
   normalized.hires_fix = normalizeHiresFix(normalized);
   return normalized;
 }
 
 export function normalizeHiresFix(plan = {}) {
+  if (plan.refine && typeof plan.refine === "object" && plan.refine.enabled) {
+    return {
+      enabled: true,
+      mode: "hires",
+      target_width: plan.refine.target_width,
+      target_height: plan.refine.target_height,
+      denoising_strength: plan.refine.denoising_strength,
+      upscaler: plan.refine.upscaler,
+      second_pass_steps: plan.refine.second_pass_steps,
+    };
+  }
+
   const baseWidth = clampInteger(plan.width, 256, 2048, 512);
   const baseHeight = clampInteger(plan.height, 256, 2048, 512);
   const targetWidth = optionalInteger(plan.target_width ?? plan.hires_fix?.target_width, 256, 4096);
@@ -130,6 +146,57 @@ export function normalizeHiresFix(plan = {}) {
     denoising_strength: clampNumber(source.denoising_strength, 0, 1, 0.2),
     upscaler: source.upscaler || "Lanczos",
     second_pass_steps: clampInteger(source.second_pass_steps, 1, 80, Math.max(10, Math.round(clampInteger(plan.steps, 1, 80, 8) * 0.6))),
+  };
+}
+
+export function normalizeRefine(plan = {}) {
+  const baseWidth = clampInteger(plan.width, 256, 2048, 512);
+  const baseHeight = clampInteger(plan.height, 256, 2048, 512);
+  const source = typeof plan.refine === "object" && plan.refine
+    ? plan.refine
+    : typeof plan.hires_fix === "object" && plan.hires_fix && plan.hires_fix.mode !== "resize"
+      ? plan.hires_fix
+      : {};
+  const explicitlyEnabled = plan.refine === true || plan.hires_fix === true || source.enabled === true;
+  const targetWidth = optionalInteger(source.target_width ?? plan.refine_width, 256, 4096);
+  const targetHeight = optionalInteger(source.target_height ?? plan.refine_height, 256, 4096);
+  const targetDiffers = Boolean(targetWidth && targetHeight && (targetWidth !== baseWidth || targetHeight !== baseHeight));
+
+  if (!explicitlyEnabled || !targetDiffers) return false;
+
+  return {
+    enabled: true,
+    target_width: targetWidth,
+    target_height: targetHeight,
+    denoising_strength: clampNumber(source.denoising_strength, 0, 1, 0.25),
+    upscaler: source.upscaler || "Latent",
+    second_pass_steps: clampInteger(source.second_pass_steps, 1, 80, Math.max(10, Math.round(clampInteger(plan.steps, 1, 80, 8) * 0.55))),
+  };
+}
+
+export function normalizeUpscale(plan = {}) {
+  const source = typeof plan.upscale === "object" && plan.upscale ? plan.upscale : {};
+  const baseWidth = clampInteger(plan.width, 256, 2048, 512);
+  const baseHeight = clampInteger(plan.height, 256, 2048, 512);
+  const refineWidth = optionalInteger(plan.refine?.target_width ?? plan.hires_fix?.target_width, 256, 4096);
+  const refineHeight = optionalInteger(plan.refine?.target_height ?? plan.hires_fix?.target_height, 256, 4096);
+  const sourceWidth = refineWidth || baseWidth;
+  const sourceHeight = refineHeight || baseHeight;
+  const targetWidth = optionalInteger(source.target_width ?? plan.target_width, 256, 4096);
+  const targetHeight = optionalInteger(source.target_height ?? plan.target_height, 256, 4096);
+  const targetDiffers = Boolean(targetWidth && targetHeight && (targetWidth !== sourceWidth || targetHeight !== sourceHeight));
+  const explicitlyDisabled = plan.upscale === false || source.enabled === false;
+  const explicitlyEnabled = source.enabled === true;
+
+  if (explicitlyDisabled || !targetDiffers && !explicitlyEnabled) return false;
+  if (!targetWidth || !targetHeight) return false;
+
+  return {
+    enabled: true,
+    target_width: targetWidth,
+    target_height: targetHeight,
+    upscaler: source.upscaler || "Lanczos",
+    resize_mode: source.resize_mode || "fit",
   };
 }
 

@@ -30,7 +30,7 @@ check_http() {
   fi
 }
 
-A1111_PATH="$ROOT/vendor/engines/stable-diffusion-webui"
+A1111_PATH="${SD_WEBUI_ROOT:-$ROOT/vendor/engines/stable-diffusion-webui}"
 A1111_URL="${A1111_BASE_URL:-http://127.0.0.1:7860}/sdapi/v1/sd-models"
 
 echo "tool.git=$(check_command git | cut -d= -f2)"

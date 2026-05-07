@@ -1,12 +1,16 @@
 # A1111 推理后端部署说明
 
-SD Agent Studio 暂时只接入 AUTOMATIC1111 WebUI / Aki WebUI。项目不会提交后端源码和模型权重，默认把 WebUI 放在：
+MuseForge Studio 当前本地绘图引擎默认接入 AUTOMATIC1111 WebUI / Aki WebUI。项目不会提交后端源码和模型权重，默认把 WebUI 放在：
 
 ```text
 vendor/engines/stable-diffusion-webui
 ```
 
 ## 快速开始
+
+这份文档只覆盖当前本地 A1111 / Aki WebUI 部署。后续桌面客户端可以复用这些检查和启动脚本，但不再单独维护一份安装向导文档。
+
+产品层后续会支持 ComfyUI、云端图像 API 和视频模型；这些能力实现后再补充独立说明。
 
 在项目根目录运行：
 
@@ -57,9 +61,12 @@ bash scripts/start-a1111.sh
 ```text
 A1111_BASE_URL=http://127.0.0.1:7860
 SD_WEBUI_BASE_URL=http://127.0.0.1:7860
+PYTORCH_ENABLE_MPS_FALLBACK=1
 ```
 
 如果你已经有可用的 Aki WebUI / A1111 服务，可以不使用脚本安装，只把 `A1111_BASE_URL` 指向已有服务。
+
+macOS Apple Silicon 使用 MPS 后端时，建议保留 `PYTORCH_ENABLE_MPS_FALLBACK=1`。它可以让 PyTorch 遇到暂不支持的 MPS 算子时回退到 CPU，避免部分模型或插件在 txt2img 时出现 `Placeholder storage has not been allocated on MPS device!`。
 
 ## 模型放置位置
 
@@ -98,6 +105,8 @@ GET http://127.0.0.1:8787/api/engines/models
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup-gemma4-e4b.ps1
 ```
+
+Web 设置页的“本地大模型”面板可以一键安装并启动 Ollama。该入口支持 macOS Homebrew 与 Windows winget；如果缺少对应包管理器，页面会提示手动安装链接。Web 入口不会自动拉取 `gemma4:e4b`，安装成功后仍需在页面中选择并拉取模型。
 
 完成后在 Web 设置页点击“创建并启用 Gemma”，或手动新增：
 

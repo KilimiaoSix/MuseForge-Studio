@@ -16,6 +16,9 @@ if (-not (Test-Path $WebuiBat)) {
 Push-Location $EnginePath
 try {
   $env:SKIP_ASSETS_UPDATE = "1"
+  if (-not $env:PYTORCH_ENABLE_MPS_FALLBACK) {
+    $env:PYTORCH_ENABLE_MPS_FALLBACK = "1"
+  }
 
   if ((Test-Path $PortablePython) -and (Test-Path $LaunchPy)) {
     & $PortablePython "launch.py" --api --listen --port $Port --skip-python-version-check --skip-install

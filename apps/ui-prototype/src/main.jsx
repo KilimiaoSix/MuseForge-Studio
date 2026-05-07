@@ -9,7 +9,8 @@ const screens = [
   ["generate", "对话作图", "✦"],
   ["assist", "AI 辅助作图", "◧"],
   ["edit", "智能改图", "▣"],
-  ["lora", "LoRA 炼制", "◈"],
+  ["lora", "炼制资产", "◈"],
+  ["assets", "生图素材", "▥"],
   ["models", "模型管家", "▤"],
   ["queue", "任务队列", "≋"],
   ["settings", "Provider 设置", "⚙"],
@@ -120,7 +121,7 @@ function App() {
           <div className="brand-mark">SA</div>
           <div>
             <div className="brand-name">SD Agent Studio</div>
-            <div className="brand-subtitle">Local creative agent</div>
+            <div className="brand-subtitle">Local tag planner</div>
           </div>
         </div>
 
@@ -171,6 +172,7 @@ function App() {
             promptTools={a1111?.promptTools}
             refreshStatus={refreshStatus}
             topGenerateRequest={topGenerateRequest}
+            setScreen={setScreen}
           />
         )}
         {screen === "assist" && (
@@ -183,21 +185,23 @@ function App() {
             resources={resources}
             refreshStatus={refreshStatus}
             topGenerateRequest={topGenerateRequest}
+            setScreen={setScreen}
           />
         )}
         {screen === "models" && <ModelsScreen checkpoints={checkpoints} webuiOnline={webuiOnline} resources={resources} setResources={setResources} refreshStatus={refreshStatus} />}
+        {screen === "assets" && <GenerationAssetsScreen setScreen={setScreen} />}
         {screen === "queue" && <QueueScreen />}
         {screen === "settings" && <SettingsScreen providerName={providerName} backendOnline={!connectionError} providerStatus={health?.providerStatus} health={health} engineModels={engineModels} refreshStatus={refreshStatus} />}
         {screen === "edit" && <StaticScreen title="智能改图" text="下一阶段接入 img2img、inpaint 和 ControlNet。当前先聚焦自然语言 txt2img 闭环。" />}
-        {screen === "lora" && <StaticScreen title="LoRA 炼制" text="向导式数据导入、质检、标签清洗和训练配置会在生图闭环稳定后继续接入。" />}
+        {screen === "lora" && <LoraTrainingScreen checkpoints={checkpoints} setScreen={setScreen} refreshStatus={refreshStatus} />}
       </main>
     </div>
   );
 }
 
-function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, refreshStatus, topGenerateRequest }) {
+function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, refreshStatus, topGenerateRequest, setScreen }) {
   const [conversation, setConversation] = useState([
-    { role: "agent", text: "告诉我你想要的画面、用途和风格，我会先解析出可编辑参数；确认后再提交到 A1111。" },
+    { role: "agent", text: "告诉我你想要的画面、用途和风格，我会先匹配 tags 并生成可编辑参数；确认后再提交到 A1111 单次出图。" },
   ]);
   const [requestText, setRequestText] = useState("画一个银发少女，穿黑色礼服，坐在雨夜咖啡馆窗边，精致插画，适合手机壁纸。");
   const [plan, setPlan] = useState(() => ({ ...defaultPlan, checkpoint: checkpointTitle(checkpoints[0]) }));
@@ -218,6 +222,8 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
   useEffect(() => {
     loadGenerations();
     restoreActiveTask();
+    const reuse = consumePendingAssetReuse("generate");
+    if (reuse) reuseGeneration(reuse.item);
   }, []);
 
   useEffect(() => {
@@ -380,6 +386,16 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
     }]);
   }
 
+  async function openGenerationFolder(item) {
+    if (!item?.generationId) return;
+    try {
+      setError("");
+      await apiPost(`/api/generations/${item.generationId}/open`, {});
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
   return (
     <section className="screen active chat-create-screen">
       <div className="chat-create-layout">
@@ -388,7 +404,7 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
             <div>
               <div className="section-label">Conversation</div>
               <h2>直接说你要的图</h2>
-              <p>我会先给出可编辑方案，确认后再提交到 A1111。</p>
+              <p>先匹配标签库生成简洁 tags，确认后提交到 A1111 单次出图。</p>
             </div>
             <span className={disabledReason ? "connection-pill warn" : "connection-pill ok-pill"}>{disabledReason || "Ready"}</span>
           </div>
@@ -411,17 +427,15 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
             ) : generating ? (
               <GenerationLoading task={activeTask} plan={plan} />
             ) : results[0] ? (
-              <div className="featured-result">
-                <img src={results[0].url} alt={results[0].filename || "latest generated result"} />
-                <div className="featured-actions">
-                  <a href={results[0].url} target="_blank" rel="noreferrer">打开大图</a>
-                  <button onClick={() => reuseGeneration(results[0])}>基于这张继续</button>
-                </div>
-              </div>
+              <GenerationAssetInspector
+                item={results[0]}
+                onOpenFolder={() => openGenerationFolder(results[0])}
+                onReuse={reuseGeneration}
+              />
             ) : (
               <div className="conversation-empty">
                 <strong>还没有生成结果</strong>
-                <span>输入一句中文需求后，我会先给出可确认参数。</span>
+                <span>输入一句中文需求后，会先生成可确认的 tags 和参数。</span>
               </div>
             )}
           </div>
@@ -441,7 +455,7 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
               placeholder="描述你想生成的图片，比如角色、场景、用途、风格。"
             />
             <button className="primary-action" onClick={submitConversation} disabled={!canSubmit}>
-              {planning ? <BusyLabel text="理解中" /> : generating ? <BusyLabel text="生成中" /> : pendingPlan ? "修改方案" : "解析方案"}
+              {planning ? <BusyLabel text="匹配 tags" /> : generating ? <BusyLabel text="单次出图" /> : pendingPlan ? "修改方案" : "解析方案"}
             </button>
             {generating && <button className="secondary-action" onClick={cancelActiveTask}>取消</button>}
           </div>
@@ -449,32 +463,22 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
         </section>
 
         <aside className="panel chat-history-rail">
-          <PanelHeader
-            title="结果"
-            text="只展示图片，不暴露参数。"
-            button={<button className="small-button" onClick={loadGenerations}>{loadingHistory ? "加载中" : "刷新"}</button>}
+          <GenerationAssetStrip
+            title="最近素材"
+            items={results}
+            selected={results[0]}
+            loading={loadingHistory}
+            onRefresh={loadGenerations}
+            onSelect={reuseGeneration}
+            onOpenAssets={() => setScreen("assets")}
           />
-          {results.length ? (
-            <div className="chat-result-grid">
-              {results.slice(0, 12).map((image) => (
-                <button key={`${image.generationId || "image"}-${image.url}`} className="chat-thumb" onClick={() => reuseGeneration(image)}>
-                  <img src={image.url} alt={image.filename || "generated result"} />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="empty-gallery compact-empty">
-              <strong>暂无图片</strong>
-              <span>生成后会自动保存到历史。</span>
-            </div>
-          )}
         </aside>
       </div>
     </section>
   );
 }
 
-function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, promptTools, refreshStatus, topGenerateRequest }) {
+function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, promptTools, refreshStatus, topGenerateRequest, setScreen }) {
   const [conversation, setConversation] = useState([]);
   const [requestText, setRequestText] = useState("");
   const [plan, setPlan] = useState(() => ({ ...defaultPlan, checkpoint: checkpointTitle(checkpoints[0]) }));
@@ -497,6 +501,8 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
   useEffect(() => {
     loadGenerations();
     restoreActiveTask();
+    const reuse = consumePendingAssetReuse("assist");
+    if (reuse) reuseGeneration(reuse.item, { fixedSeed: reuse.fixedSeed });
   }, []);
 
   useEffect(() => {
@@ -677,6 +683,16 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
     }
   }
 
+  async function openGenerationFolder(item) {
+    if (!item?.generationId) return;
+    try {
+      setError("");
+      await apiPost(`/api/generations/${item.generationId}/open`, {});
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
   async function loadPromptTags(query = "", groupId = "") {
     try {
       const params = new URLSearchParams({
@@ -744,7 +760,7 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
             </div>
             <div className="assist-command-actions">
               <button className="primary-action" onClick={createPlan} disabled={planning || !requestText.trim()}>
-                {planning ? <BusyLabel text="解析中" /> : "解析到方案"}
+                {planning ? <BusyLabel text="匹配 tags" /> : "解析到方案"}
               </button>
               <button className="small-button" onClick={() => setRequestText("")} disabled={!requestText.trim() || planning}>清空</button>
               <span className={disabledReason ? "warn-text" : "ok"}>{disabledReason || "Ready"}</span>
@@ -854,8 +870,6 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
               <div className="assist-param-grid">
                 <label>W<input type="number" value={plan.width} onChange={(event) => setNumberPlanValue(setPlan, "width", event.target.value)} /></label>
                 <label>H<input type="number" value={plan.height} onChange={(event) => setNumberPlanValue(setPlan, "height", event.target.value)} /></label>
-                <label>目标W<input type="number" value={plan.target_width || ""} onChange={(event) => setTargetPlanValue(setPlan, "target_width", event.target.value)} placeholder="同生成" /></label>
-                <label>目标H<input type="number" value={plan.target_height || ""} onChange={(event) => setTargetPlanValue(setPlan, "target_height", event.target.value)} placeholder="同生成" /></label>
                 <label>Steps<input type="number" value={plan.steps} onChange={(event) => setNumberPlanValue(setPlan, "steps", event.target.value)} /></label>
                 <label>CFG<input type="number" step="0.5" value={plan.cfg_scale} onChange={(event) => setNumberPlanValue(setPlan, "cfg_scale", event.target.value)} /></label>
                 <label>Batch<input type="number" value={plan.batch_size} onChange={(event) => setNumberPlanValue(setPlan, "batch_size", event.target.value)} /></label>
@@ -864,19 +878,9 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
               </div>
               <CompatibilitySummary compatibility={compatibility} />
               <LoraEditor plan={plan} setPlan={setPlan} loras={loras} resources={resources} />
-              <div className="toggle-row-inline pro-toggles">
-                <ToggleRow label="高清修复" checked={isHiresEnabled(plan)} onChange={(checked) => setHiresEnabled(setPlan, checked)} />
-                <ToggleRow label="ADetailer" checked={Boolean(plan.adetailer)} onChange={(checked) => setPlanValue(setPlan, "adetailer", checked)} />
-              </div>
-              {isHiresEnabled(plan) && (
-                <div className="hires-settings">
-                  <label>Denoise<input type="number" step="0.05" value={plan.hires_fix?.denoising_strength ?? 0.2} onChange={(event) => setPlanValue(setPlan, "hires_fix", nextHiresFix(plan, { denoising_strength: Number(event.target.value) }))} /></label>
-                  <label>Upscaler<input value={plan.hires_fix?.upscaler || "Lanczos"} onChange={(event) => setPlanValue(setPlan, "hires_fix", nextHiresFix(plan, { upscaler: event.target.value }))} /></label>
-                  <label>二次步数<input type="number" value={plan.hires_fix?.second_pass_steps ?? Math.max(10, Math.round(plan.steps * 0.6))} onChange={(event) => setPlanValue(setPlan, "hires_fix", nextHiresFix(plan, { second_pass_steps: Number(event.target.value) }))} /></label>
-                </div>
-              )}
+              <ControlNetEditor plan={plan} setPlan={setPlan} resources={resources} />
               <div className="rationale-box pro-rationale">
-                <span>AI 解析</span>
+                <span>Tag 解析</span>
                 <strong>{plan.rationale || "等待解析方案"}</strong>
               </div>
             </div>
@@ -886,7 +890,7 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
             <div className="assist-console-log">
               {conversation.slice(-4).map((item, index) => (
                 <div key={`${item.role}-${index}`} className={`assist-log-entry ${item.role === "agent" ? "agent" : "user"} ${index > 0 ? "subtle" : ""}`}>
-                  <span>{item.role === "agent" ? "AI" : "用户"}</span>
+                  <span>{item.role === "agent" ? "系统" : "用户"}</span>
                   <p>{item.text}</p>
                 </div>
               ))}
@@ -905,21 +909,19 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
                 <span>{compatibilityLabel(compatibility)}</span>
               </div>
               <button className="primary-action render-button" onClick={runGeneration} disabled={!canGenerate}>
-                {generating ? <BusyLabel text="生成中" /> : "生成"}
+                {generating ? <BusyLabel text="单次出图" /> : "生成"}
               </button>
             </div>
             {generating && <button className="wide secondary-action" onClick={cancelActiveTask}>取消任务</button>}
             {generating ? (
               <GenerationLoading task={activeTask} plan={plan} />
             ) : results[0] ? (
-              <div className="assist-latest-preview">
-                <img src={results[0].url} alt={results[0].filename || "latest generated result"} />
-                <div>
-                  <a href={results[0].url} target="_blank" rel="noreferrer">打开</a>
-                  <button onClick={() => reuseGeneration(results[0])}>复用</button>
-                  <button onClick={() => reuseGeneration(results[0], { fixedSeed: true })}>固定 Seed</button>
-                </div>
-              </div>
+              <RenderResultCard
+                item={results[0]}
+                onOpenFolder={() => openGenerationFolder(results[0])}
+                onReuse={() => reuseGeneration(results[0])}
+                onFixedSeed={() => reuseGeneration(results[0], { fixedSeed: true })}
+              />
             ) : (
               <div className="render-empty-state">
                 <span>{disabledReason || "方案确认后即可提交到 A1111。"}</span>
@@ -928,31 +930,15 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
           </div>
 
           <div className="panel history-panel assist-history-panel">
-            <PanelHeader
-              title="历史"
-              button={<button className="small-button" onClick={loadGenerations}>{loadingHistory ? "加载中" : "刷新"}</button>}
+            <GenerationAssetStrip
+              title="素材历史"
+              items={results}
+              selected={results[0]}
+              loading={loadingHistory}
+              onRefresh={loadGenerations}
+              onSelect={(item) => reuseGeneration(item)}
+              onOpenAssets={() => setScreen("assets")}
             />
-            {results.length ? (
-              <div className="gallery-grid history-grid assist-history-grid">
-                {results.slice(0, 12).map((image) => (
-                  <div key={`${image.generationId || "image"}-${image.url}`} className="gallery-link">
-                    <img src={image.url} alt={image.filename || "generated result"} />
-                    <span>{image.filename || "base64 result"}</span>
-                    <div className="gallery-actions">
-                      <a href={image.url} target="_blank" rel="noreferrer">开</a>
-                      <button onClick={() => reuseGeneration(image)}>复</button>
-                      <button onClick={() => reuseGeneration(image, { fixedSeed: true })}>Seed</button>
-                      <button onClick={() => deleteGenerationItem(image)}>删</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="empty-gallery compact-empty">
-                <strong>暂无历史</strong>
-                <span>生成完成后会自动保存。</span>
-              </div>
-            )}
           </div>
         </aside>
       </div>
@@ -980,7 +966,7 @@ function ChatPlanConfirm({ plan, setPlan, checkpoints, loras, samplers, resource
           <label>Positive<textarea className="code-area chat-positive" value={plan.positive_prompt} onChange={(event) => setPlanValue(setPlan, "positive_prompt", event.target.value)} /></label>
           <label>Negative<textarea className="code-area chat-negative" value={plan.negative_prompt} onChange={(event) => setPlanValue(setPlan, "negative_prompt", event.target.value)} /></label>
           <div className="chat-plan-rationale">
-            <span>AI 解析</span>
+            <span>Tag 解析</span>
             <p>{plan.rationale || "等待解析方案"}</p>
           </div>
         </section>
@@ -1001,8 +987,6 @@ function ChatPlanConfirm({ plan, setPlan, checkpoints, loras, samplers, resource
           <div className="chat-param-grid">
             <label>W<input type="number" value={plan.width} onChange={(event) => setNumberPlanValue(setPlan, "width", event.target.value)} /></label>
             <label>H<input type="number" value={plan.height} onChange={(event) => setNumberPlanValue(setPlan, "height", event.target.value)} /></label>
-            <label>目标W<input type="number" value={plan.target_width || ""} onChange={(event) => setTargetPlanValue(setPlan, "target_width", event.target.value)} placeholder="同生成" /></label>
-            <label>目标H<input type="number" value={plan.target_height || ""} onChange={(event) => setTargetPlanValue(setPlan, "target_height", event.target.value)} placeholder="同生成" /></label>
             <label>Steps<input type="number" value={plan.steps} onChange={(event) => setNumberPlanValue(setPlan, "steps", event.target.value)} /></label>
             <label>CFG<input type="number" step="0.5" value={plan.cfg_scale} onChange={(event) => setNumberPlanValue(setPlan, "cfg_scale", event.target.value)} /></label>
             <label>Batch<input type="number" value={plan.batch_size} onChange={(event) => setNumberPlanValue(setPlan, "batch_size", event.target.value)} /></label>
@@ -1011,7 +995,6 @@ function ChatPlanConfirm({ plan, setPlan, checkpoints, loras, samplers, resource
           </div>
 
           <CompatibilitySummary compatibility={compatibility} />
-
           <div className="chat-plan-subsection">
             <div className="chat-section-title compact">
               <strong>LoRA</strong>
@@ -1022,18 +1005,12 @@ function ChatPlanConfirm({ plan, setPlan, checkpoints, loras, samplers, resource
 
           <div className="chat-plan-subsection">
             <div className="chat-section-title compact">
-              <strong>高清修复</strong>
-              <span>{isHiresEnabled(plan) ? "开启" : "关闭"}</span>
+              <strong>ControlNet</strong>
+              <span>{plan.controlnet?.length ? `${plan.controlnet.length} 个` : "未使用"}</span>
             </div>
-            <ToggleRow label="二次重绘" checked={isHiresEnabled(plan)} onChange={(checked) => setHiresEnabled(setPlan, checked)} />
-            {isHiresEnabled(plan) && (
-              <div className="hires-settings compact-hires">
-                <label>Denoise<input type="number" step="0.05" value={plan.hires_fix?.denoising_strength ?? 0.2} onChange={(event) => setPlanValue(setPlan, "hires_fix", nextHiresFix(plan, { denoising_strength: Number(event.target.value) }))} /></label>
-                <label>Upscaler<input value={plan.hires_fix?.upscaler || "Lanczos"} onChange={(event) => setPlanValue(setPlan, "hires_fix", nextHiresFix(plan, { upscaler: event.target.value }))} /></label>
-                <label>二次步数<input type="number" value={plan.hires_fix?.second_pass_steps ?? Math.max(10, Math.round(plan.steps * 0.6))} onChange={(event) => setPlanValue(setPlan, "hires_fix", nextHiresFix(plan, { second_pass_steps: Number(event.target.value) }))} /></label>
-              </div>
-            )}
+            <ControlNetEditor plan={plan} setPlan={setPlan} resources={resources} compact />
           </div>
+
         </section>
       </div>
 
@@ -1054,6 +1031,7 @@ function LoraEditor({ plan, setPlan, loras, resources, compact = false }) {
   const activeNames = new Set(selected.map((item) => item.name));
   const loraChoices = compatibleLoraOptions(plan.checkpoint, resources, loras);
   const options = loraChoices.filter((lora) => !activeNames.has(loraTitle(lora)));
+  const loraByName = new Map(loraChoices.map((lora) => [loraTitle(lora), lora]));
 
   function addLora(name) {
     if (!name) return;
@@ -1061,6 +1039,8 @@ function LoraEditor({ plan, setPlan, loras, resources, compact = false }) {
     const next = {
       name,
       alias: resource?.alias,
+      baseType: resource?.baseType,
+      notes: resource?.notes,
       weight: Number(resource?.defaultWeight || 0.75),
       trigger_words: Array.isArray(resource?.triggerWords) ? resource.triggerWords : [],
     };
@@ -1090,37 +1070,247 @@ function LoraEditor({ plan, setPlan, loras, resources, compact = false }) {
         <select value="" onChange={(event) => addLora(event.target.value)} disabled={!options.length}>
           <option value="">{options.length ? "添加 LoRA" : "没有可添加 LoRA"}</option>
           {options.map((lora) => (
-            <option key={loraTitle(lora)} value={loraTitle(lora)}>{loraTitle(lora)}</option>
+            <option key={loraTitle(lora)} value={loraTitle(lora)}>{resourceOptionLabel(lora, "lora")}</option>
           ))}
         </select>
       </div>
       {selected.length ? (
         <div className="lora-chip-list">
-          {selected.map((lora, index) => (
-            <div key={`${lora.name}-${index}`} className="lora-chip">
-              <strong title={lora.name}>{lora.name}</strong>
-              <input
-                type="number"
-                step="0.05"
-                min="-2"
-                max="2"
-                value={lora.weight}
-                onChange={(event) => updateLora(index, { weight: Number(event.target.value) })}
-                aria-label={`${lora.name} weight`}
-              />
-              <input
-                value={lora.trigger_words.join(", ")}
-                onChange={(event) => updateLora(index, { trigger_words: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })}
-                placeholder="触发词"
-                aria-label={`${lora.name} trigger words`}
-              />
-              <button type="button" onClick={() => removeLora(index)} aria-label={`remove ${lora.name}`}>删</button>
-            </div>
-          ))}
+          {selected.map((lora, index) => {
+            const profile = { ...loraByName.get(lora.name), ...lora, triggerWords: lora.trigger_words };
+            return (
+              <div key={`${lora.name}-${index}`} className="lora-chip">
+                <strong title={lora.name}>{lora.name}</strong>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="-2"
+                  max="2"
+                  value={lora.weight}
+                  onChange={(event) => updateLora(index, { weight: Number(event.target.value) })}
+                  aria-label={`${lora.name} weight`}
+                />
+                <input
+                  value={lora.trigger_words.join(", ")}
+                  onChange={(event) => updateLora(index, { trigger_words: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })}
+                  placeholder="触发词"
+                  aria-label={`${lora.name} trigger words`}
+                />
+                <button type="button" onClick={() => removeLora(index)} aria-label={`remove ${lora.name}`}>删</button>
+                <p className="resource-usage">{resourceUsageSummary(profile, "lora")}</p>
+              </div>
+            );
+          })}
         </div>
       ) : (
         <p className="lora-empty">未使用 LoRA</p>
       )}
+    </div>
+  );
+}
+
+function ControlNetEditor({ plan, setPlan, resources, compact = false }) {
+  const selected = normalizeControlNetForUi(plan.controlnet);
+  const activeNames = new Set(selected.map((item) => item.name));
+  const choices = compatibleControlNetOptions(plan.checkpoint, resources);
+  const options = choices.filter((control) => !activeNames.has(control.name));
+  const controlByName = new Map(choices.map((control) => [control.name, control]));
+  const extension = resources?.a1111?.controlnetExtension || {};
+  const modules = Array.isArray(extension.modules) && extension.modules.length
+    ? extension.modules
+    : ["none", "openpose_full", "lineart_realistic", "depth_midas", "canny", "tile_resample"];
+  const [uploading, setUploading] = useState({});
+  const [dragging, setDragging] = useState({});
+
+  function addControlNet(name) {
+    if (!name) return;
+    const resource = choices.find((item) => item.name === name);
+    const next = {
+      name,
+      model: name,
+      extensionName: resource?.extensionName || resource?.model || "",
+      baseType: resource?.baseType,
+      controlType: resource?.controlType,
+      notes: resource?.notes,
+      image: "",
+      module: resource?.defaultPreprocessor || resource?.defaultModule || "none",
+      weight: Number(resource?.defaultControlWeight || 1),
+      guidance_start: 0,
+      guidance_end: 1,
+      control_mode: "Balanced",
+      pixel_perfect: true,
+    };
+    setPlan((current) => ({ ...current, controlnet: [...normalizeControlNetForUi(current.controlnet), next] }));
+    window.setTimeout(() => {
+      const unit = document.querySelector(".controlnet-unit:last-child");
+      unit?.closest(".assist-param-editor, .chat-plan-body")?.scrollTo({ top: unit.closest(".assist-param-editor, .chat-plan-body")?.scrollHeight || 0, behavior: "auto" });
+      unit?.scrollIntoView({ block: "center", behavior: "auto" });
+    }, 80);
+  }
+
+  function updateControlNet(index, patch) {
+    setPlan((current) => {
+      const next = normalizeControlNetForUi(current.controlnet);
+      next[index] = { ...next[index], ...patch };
+      return { ...current, controlnet: next.filter((item) => item.name) };
+    });
+  }
+
+  function removeControlNet(index) {
+    setPlan((current) => {
+      const next = normalizeControlNetForUi(current.controlnet);
+      next.splice(index, 1);
+      return { ...current, controlnet: next };
+    });
+  }
+
+  async function uploadReferenceImage(index, file) {
+    if (!file) return;
+    if (!file.type?.startsWith("image/")) {
+      setUploading((state) => ({ ...state, [index]: "请选择图片文件" }));
+      return;
+    }
+    try {
+      setUploading((state) => ({ ...state, [index]: "上传中..." }));
+      const image = await readFileAsDataUrl(file);
+      const response = await apiPost("/api/controlnet/reference-images", {
+        image,
+        filename: file.name,
+      });
+      updateControlNet(index, { image: response.reference?.url || image });
+      setUploading((state) => ({ ...state, [index]: "已加载本地参考图" }));
+    } catch (error) {
+      setUploading((state) => ({ ...state, [index]: error.message || "上传失败" }));
+    }
+  }
+
+  function handleDrop(event, index) {
+    event.preventDefault();
+    setDragging((state) => ({ ...state, [index]: false }));
+    uploadReferenceImage(index, event.dataTransfer.files?.[0]);
+  }
+
+  return (
+    <div className={`controlnet-editor ${compact ? "compact-controlnet-editor" : ""}`}>
+      <div className="controlnet-editor-head">
+        <span>ControlNet</span>
+        <select value="" onChange={(event) => addControlNet(event.target.value)} disabled={!options.length}>
+          <option value="">{options.length ? "添加 ControlNet" : "没有可添加 ControlNet"}</option>
+          {options.map((control) => (
+            <option key={control.name} value={control.name}>{resourceOptionLabel(control, "controlnet")}</option>
+          ))}
+        </select>
+      </div>
+      {!compact && (
+        <p className={`controlnet-extension-status ${extension.installed ? "ok" : "bad"}`}>
+          {extension.installed ? `A1111 ControlNet 扩展可用 · ${extension.models?.length || 0} 个模型 · ${modules.length} 个预处理器` : "未检测到 A1111 ControlNet 扩展，添加后可能无法生成。"}
+        </p>
+      )}
+      {selected.length ? (
+        <div className="controlnet-unit-list">
+          {selected.map((control, index) => {
+            const profile = { ...controlByName.get(control.name), ...control };
+            return (
+              <div key={`${control.name}-${index}`} className="controlnet-unit">
+                <div className="controlnet-unit-head">
+                  <strong title={control.name}>{control.name}</strong>
+                  <button type="button" onClick={() => removeControlNet(index)} aria-label={`remove ${control.name}`}>删</button>
+                </div>
+                <p className="resource-usage">{resourceUsageSummary(profile, "controlnet")}</p>
+                {(() => {
+                  const preview = controlReferencePreview(control.image);
+                  return (
+                <div
+                  className={`controlnet-reference-drop ${dragging[index] ? "dragging" : ""}`}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    setDragging((state) => ({ ...state, [index]: true }));
+                  }}
+                  onDragLeave={() => setDragging((state) => ({ ...state, [index]: false }))}
+                  onDrop={(event) => handleDrop(event, index)}
+                >
+                  {preview ? (
+                    <img src={preview} alt={`${control.name} reference`} />
+                  ) : control.image ? (
+                    <div className="controlnet-reference-empty">
+                      <strong>已填写参考图路径</strong>
+                      <span>生成时由后端读取</span>
+                    </div>
+                  ) : (
+                    <div className="controlnet-reference-empty">
+                      <strong>拖入参考图</strong>
+                      <span>支持 PNG / JPG / WebP</span>
+                    </div>
+                  )}
+                  <div className="controlnet-reference-actions">
+                    <label className="small-button file-button">
+                      选择文件
+                      <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => uploadReferenceImage(index, event.target.files?.[0])} />
+                    </label>
+                    {control.image && <button type="button" className="small-button" onClick={() => updateControlNet(index, { image: "" })}>清除</button>}
+                  </div>
+                </div>
+                  );
+                })()}
+                <label className="span-field">参考图路径 / URL / base64
+                  <textarea
+                    value={control.image}
+                    onChange={(event) => updateControlNet(index, { image: event.target.value })}
+                    placeholder="拖入图片、选择本地文件，或粘贴 /outputs/controlnet/xxx.png"
+                  />
+                  {uploading[index] && <span className="controlnet-upload-status">{uploading[index]}</span>}
+                </label>
+                <ControlNetQuickModes control={control} onChange={(patch) => updateControlNet(index, patch)} />
+                <div className="controlnet-grid">
+                  <label>Preprocessor
+                    <select value={control.module} onChange={(event) => updateControlNet(index, { module: event.target.value || "none" })}>
+                      {uniqueValues([control.module, ...modules]).map((module) => <option key={module} value={module}>{module}</option>)}
+                    </select>
+                  </label>
+                  <label>Weight<input type="number" step="0.05" min="0" max="2" value={control.weight} onChange={(event) => updateControlNet(index, { weight: Number(event.target.value) })} /></label>
+                  <label>Start<input type="number" step="0.05" min="0" max="1" value={control.guidance_start} onChange={(event) => updateControlNet(index, { guidance_start: Number(event.target.value) })} /></label>
+                  <label>End<input type="number" step="0.05" min="0" max="1" value={control.guidance_end} onChange={(event) => updateControlNet(index, { guidance_end: Number(event.target.value) })} /></label>
+                </div>
+                <label className="switch">
+                  <input type="checkbox" checked={control.pixel_perfect !== false} onChange={(event) => updateControlNet(index, { pixel_perfect: event.target.checked })} />
+                  Pixel Perfect
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="controlnet-empty">未使用 ControlNet</p>
+      )}
+    </div>
+  );
+}
+
+function ControlNetQuickModes({ control, onChange }) {
+  const modes = [
+    { id: "pose", label: "姿势", module: "openpose_full", weight: 0.75, control_mode: "Balanced" },
+    { id: "lineart", label: "线稿", module: "lineart_realistic", weight: 0.7, control_mode: "ControlNet is more important" },
+    { id: "depth", label: "空间", module: "depth_midas", weight: 0.75, control_mode: "Balanced" },
+    { id: "canny", label: "轮廓", module: "canny", weight: 0.65, control_mode: "Balanced" },
+  ];
+  const current = control.controlType || control.module || "";
+  return (
+    <div className="controlnet-quick-modes" role="group" aria-label="ControlNet quick modes">
+      {modes.map((mode) => (
+        <button
+          key={mode.id}
+          type="button"
+          className={current.includes(mode.id) || control.module === mode.module ? "active" : ""}
+          onClick={() => onChange({
+            module: mode.module,
+            weight: mode.weight,
+            control_mode: mode.control_mode,
+            pixel_perfect: true,
+          })}
+        >
+          {mode.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -1171,23 +1361,593 @@ function PlanStat({ label, value }) {
 function GenerationLoading({ task, plan }) {
   const progress = Math.round((task?.progress || 0) * 100);
   const preview = task?.result?.progressPreview || "";
+  const taskType = task?.plan?.task_type || plan?.task_type || "txt2img";
+  const simpleTxt2Img = !["lora_training", "controlnet_install", "controlnet_extension_install"].includes(taskType);
+  const steps = plan?.steps || task?.plan?.steps || "-";
+  const sampler = plan?.sampler || task?.plan?.sampler || "A1111";
   return (
-    <div className="generation-loading" role="status" aria-live="polite">
+    <div className={`generation-loading ${simpleTxt2Img ? "simple-render" : "task-render"}`} role="status" aria-live="polite">
       {preview ? <img className="progress-preview" src={preview} alt="A1111 progress preview" /> : (
-        <div className="loading-orbit" aria-hidden="true">
+        <div className="loading-mark" aria-hidden="true">
           <span />
         </div>
       )}
       <div className="loading-copy">
-        <strong>{task?.progressLabel || "A1111 正在生成"}</strong>
-        <span>{sizeSummary(plan)} · {plan.steps} steps · {plan.sampler} · {progress}%</span>
+        <strong>{task?.progressLabel || (simpleTxt2Img ? "A1111 单次出图中" : "任务处理中")}</strong>
+        <span>{sizeSummary(plan)} · {steps} steps · {sampler} · {progress}%</span>
       </div>
       <div className="loading-bar determinate" aria-hidden="true"><span style={{ width: `${Math.max(4, progress)}%` }} /></div>
-      <div className="loading-steps">
-        <span>{task?.id ? `任务 ${task.id.slice(0, 8)}` : "提交 txt2img"}</span>
-        <span>{task?.status || "running"}</span>
-        <span>保存到 outputs</span>
+      <div className="loading-flow">
+        {simpleTxt2Img ? (
+          <>
+            <span className="flow-step done">tags 已确认</span>
+            <span className={`flow-step ${progress >= 95 ? "done" : "running"}`}>单次 txt2img</span>
+            <span className={`flow-step ${progress >= 100 ? "done" : ""}`}>保存结果</span>
+          </>
+        ) : (
+          <span className="flow-step running">{task?.progressLabel || "处理中"}</span>
+        )}
       </div>
+    </div>
+  );
+}
+
+function GenerationAssetsScreen({ setScreen }) {
+  const [items, setItems] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [query, setQuery] = useState("");
+  const [checkpointFilter, setCheckpointFilter] = useState("all");
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    void loadAssets();
+  }, []);
+
+  async function loadAssets() {
+    try {
+      setLoading(true);
+      const response = await apiGet("/api/generations?limit=100");
+      const nextItems = (response.generations || []).flatMap(generationToGalleryItems);
+      setItems(nextItems);
+      setSelected((current) => nextItems.find((item) => item.generationId === current?.generationId && item.url === current?.url) || nextItems[0] || null);
+      setError("");
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openSelectedInFolder() {
+    if (!selected?.generationId) return;
+    try {
+      setError("");
+      await apiPost(`/api/generations/${selected.generationId}/open`, {});
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
+  async function deleteSelected() {
+    if (!selected?.generationId) return;
+    if (!window.confirm("确认删除这条生成记录和图片文件？")) return;
+    try {
+      setError("");
+      await apiDelete(`/api/generations/${selected.generationId}`);
+      await loadAssets();
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
+  async function updateSelected(patch) {
+    if (!selected?.generationId) return;
+    try {
+      setError("");
+      const response = await apiPut(`/api/generations/${selected.generationId}`, patch);
+      const updatedItems = generationToGalleryItems(response.generation);
+      const replacement = updatedItems.find((item) => item.url === selected.url) || updatedItems[0];
+      setItems((current) => current.map((item) => item.generationId === selected.generationId ? { ...item, ...replacement } : item));
+      setSelected(replacement);
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
+  async function deleteSelectedBatch() {
+    if (!selectedIds.length) return;
+    if (!window.confirm(`确认删除 ${selectedIds.length} 条生成记录和图片文件？`)) return;
+    try {
+      setError("");
+      await apiDeleteWithBody("/api/generations", { ids: selectedIds });
+      setSelectedIds([]);
+      await loadAssets();
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
+  function toggleSelectId(id) {
+    setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  function reuseTo(screen, options = {}) {
+    if (!selected) return;
+    stashPendingAssetReuse(screen, selected, options);
+    setScreen(screen);
+  }
+
+  const checkpoints = [...new Set(items.map((item) => item.plan?.checkpoint || item.checkpoint || "").filter(Boolean))];
+  const filteredItems = items.filter((item) => {
+    const text = [item.filename, item.prompt, item.plan?.positive_prompt, item.plan?.checkpoint, item.purpose].filter(Boolean).join(" ").toLowerCase();
+    const matchesQuery = !query.trim() || text.includes(query.trim().toLowerCase());
+    const matchesCheckpoint = checkpointFilter === "all" || (item.plan?.checkpoint || item.checkpoint) === checkpointFilter;
+    const matchesFavorite = !favoriteOnly || item.favorite;
+    return matchesQuery && matchesCheckpoint && matchesFavorite;
+  });
+
+  return (
+    <section className="screen active assets-screen">
+      <div className="assets-workbench">
+        <section className="panel asset-browser-panel">
+          <PanelHeader
+            title="生图素材"
+            text={`${filteredItems.length} / ${items.length} 张素材`}
+            button={<button className="small-button" onClick={loadAssets}>{loading ? "加载中" : "刷新"}</button>}
+          />
+          <div className="asset-toolbar">
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件、prompt、模型、用途" />
+            <select value={checkpointFilter} onChange={(event) => setCheckpointFilter(event.target.value)}>
+              <option value="all">全部模型</option>
+              {checkpoints.map((checkpoint) => <option key={checkpoint} value={checkpoint}>{checkpoint}</option>)}
+            </select>
+            <button className={favoriteOnly ? "small-button active" : "small-button"} onClick={() => setFavoriteOnly(!favoriteOnly)}>收藏</button>
+            <button className="small-button danger-button" onClick={deleteSelectedBatch} disabled={!selectedIds.length}>删除选中</button>
+          </div>
+          {error && <div className="inline-error">{error}</div>}
+          {filteredItems.length ? (
+            <GenerationAssetGrid items={filteredItems} selected={selected} selectedIds={selectedIds} onSelect={setSelected} onToggleSelect={toggleSelectId} />
+          ) : (
+            <div className="empty-gallery compact-empty">
+              <strong>暂无素材</strong>
+              <span>完成一次生图后会自动写入这里。</span>
+            </div>
+          )}
+        </section>
+
+        <aside className="panel asset-inspector-panel">
+          <PanelHeader title="素材详情" text={selected ? formatDateTime(selected.createdAt) : "选择一张图片查看参数"} />
+          {selected ? (
+            <GenerationAssetInspector
+              item={selected}
+              onOpenFolder={openSelectedInFolder}
+              onDelete={deleteSelected}
+              onReuse={() => reuseTo("generate")}
+              onFixedSeed={() => reuseTo("assist", { fixedSeed: true })}
+              onToggleFavorite={() => updateSelected({ favorite: !selected.favorite })}
+              onPurposeChange={(purpose) => updateSelected({ purpose })}
+            />
+          ) : (
+            <div className="render-empty-state"><span>左侧选择素材后可打开本地文件夹。</span></div>
+          )}
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function LoraTrainingScreen({ checkpoints, setScreen, refreshStatus }) {
+  const [projects, setProjects] = useState([]);
+  const [project, setProject] = useState(null);
+  const [form, setForm] = useState({
+    projectName: "my_character",
+    triggerWord: "my_character",
+    assetType: "character",
+    strategy: "stable",
+    baseModel: checkpoints[0]?.title || checkpoints[0]?.name || "",
+  });
+  const [files, setFiles] = useState([]);
+  const [captions, setCaptions] = useState([]);
+  const [task, setTask] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    loadProjects();
+  }, []);
+
+  useEffect(() => {
+    if (!task || !isTaskActive(task)) return undefined;
+    const timer = window.setInterval(() => pollTask(task.id), 1500);
+    return () => window.clearInterval(timer);
+  }, [task?.id, task?.status]);
+
+  async function loadProjects() {
+    try {
+      const response = await apiGet("/api/lora/projects");
+      setProjects(response.projects || []);
+      if (!project && response.projects?.[0]) {
+        setProject(response.projects[0]);
+        setCaptions(response.projects[0].captions || []);
+      }
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    }
+  }
+
+  async function createProject() {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await apiPost("/api/lora/projects", form);
+      setProject(response.project);
+      setCaptions(response.project.captions || []);
+      setMessage("已创建资产项目，下一步上传素材。");
+      await loadProjects();
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadAssets() {
+    if (!project) return;
+    if (!files.length) {
+      setError("请选择图片或 ZIP 素材。");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const encoded = await Promise.all(Array.from(files).map(fileToDataUrlPayload));
+      const response = await apiPost(`/api/lora/projects/${project.id}/assets`, { files: encoded });
+      setProject(response.project);
+      setMessage(`已导入 ${response.saved?.length || 0} 组素材。`);
+      await inspectProject(response.project.id);
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function inspectProject(projectId = project?.id) {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      const response = await apiPost(`/api/lora/projects/${projectId}/inspect`, {});
+      setProject(response.project);
+      setCaptions(response.project.captions || []);
+      setMessage("素材体检完成，可以检查标签。");
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCaptions() {
+    if (!project) return;
+    setBusy(true);
+    try {
+      const response = await apiPut(`/api/lora/projects/${project.id}/captions`, { captions });
+      setProject(response.project);
+      setMessage("标签已保存。");
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createPlan() {
+    if (!project) return;
+    setBusy(true);
+    try {
+      const response = await apiPost(`/api/lora/projects/${project.id}/plan`, {
+        strategy: form.strategy,
+        baseModel: form.baseModel,
+      });
+      setProject(response.project);
+      setMessage("训练方案已生成。");
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startTraining() {
+    if (!project) return;
+    setBusy(true);
+    try {
+      const response = await apiPost(`/api/lora/projects/${project.id}/train`, {});
+      setTask(response.task);
+      setMessage("训练任务已加入队列。");
+      setScreen?.("queue");
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function installLora() {
+    if (!project) return;
+    setBusy(true);
+    try {
+      const response = await apiPost(`/api/lora/projects/${project.id}/install`, {});
+      setProject(response.project);
+      setMessage("LoRA 已安装到 models/Lora。");
+      await refreshStatus?.();
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pollTask(taskId) {
+    try {
+      const response = await apiGet(`/api/tasks/${taskId}`);
+      setTask(response.task);
+      if (!isTaskActive(response.task) && project) {
+        const latest = await apiGet(`/api/lora/projects/${project.id}`);
+        setProject(latest.project);
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  const summary = project?.summary || {};
+  const plan = project?.trainPlan;
+  const trained = project?.trainedModel;
+
+  return (
+    <section className="screen active lora-training-screen">
+      <div className="workspace-grid lora-training-grid">
+        <div className="panel span-3">
+          <PanelHeader
+            title="炼制角色 / 资产"
+            text="把一组角色、画风、服装或表情包素材炼成之后可反复调用的创作资产。"
+            button={<button className="primary-action" onClick={createProject} disabled={busy}>新建项目</button>}
+          />
+          <div className="steps lora-steps">
+            <span className={project ? "done" : "active"}>选类型</span>
+            <span className={project?.imageCount ? "done" : project ? "active" : ""}>上传素材</span>
+            <span className={project?.summary ? "done" : ""}>素材体检</span>
+            <span className={captions.length ? "done" : ""}>确认标签</span>
+            <span className={plan ? "done" : ""}>训练配置</span>
+            <span className={trained ? "done" : ""}>试画保存</span>
+          </div>
+          {message && <div className="inline-success">{message}</div>}
+          {error && <div className="inline-error">{error}</div>}
+        </div>
+
+        <div className="panel lora-project-panel">
+          <PanelHeader title="1. 资产信息" text="普通模式只需要确认资产用途和召唤名字。" />
+          <div className="param-grid">
+            <label>项目名<input value={form.projectName} onChange={(event) => setForm({ ...form, projectName: event.target.value })} /></label>
+            <label>召唤名字<input value={form.triggerWord} onChange={(event) => setForm({ ...form, triggerWord: event.target.value })} /></label>
+            <label>资产类型<select value={form.assetType} onChange={(event) => setForm({ ...form, assetType: event.target.value })}>
+              <option value="character">固定角色</option>
+              <option value="style">画风模板</option>
+              <option value="meme">表情包角色</option>
+              <option value="outfit">服装</option>
+              <option value="prop">道具</option>
+            </select></label>
+            <label>训练策略<select value={form.strategy} onChange={(event) => setForm({ ...form, strategy: event.target.value })}>
+              <option value="stable">稳定优先</option>
+              <option value="faithful">还原优先</option>
+              <option value="stylized">风格化优先</option>
+            </select></label>
+          </div>
+          <label className="full-field">Base model
+            <select value={form.baseModel} onChange={(event) => setForm({ ...form, baseModel: event.target.value })}>
+              <option value="">训练前选择 base model</option>
+              {checkpoints.map((checkpoint) => (
+                <option key={checkpoint.title || checkpoint.name} value={checkpoint.title || checkpoint.name}>{checkpoint.title || checkpoint.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="mini-list">
+            {projects.slice(0, 5).map((item) => (
+              <button key={item.id} className={project?.id === item.id ? "selected" : ""} onClick={() => { setProject(item); setCaptions(item.captions || []); }}>
+                {item.projectName}<span>{assetTypeLabel(item.assetType)} · {item.status}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <PanelHeader title="2. 上传素材" text="支持 PNG/JPG/WebP 和 ZIP。ZIP 会在项目素材目录解压。" />
+          <input type="file" multiple accept="image/png,image/jpeg,image/webp,.zip" onChange={(event) => setFiles(event.target.files || [])} />
+          <button className="wide primary-action" onClick={uploadAssets} disabled={!project || busy}>上传并体检</button>
+          <div className="quality-list compact-quality">
+            <div><strong>{summary.total || project?.imageCount || 0}</strong><span>总图片</span></div>
+            <div><strong>{summary.accepted || 0}</strong><span>推荐使用</span></div>
+            <div><strong>{summary.rejected || 0}</strong><span>建议剔除</span></div>
+            <div><strong>{summary.needsCrop || 0}</strong><span>需裁剪</span></div>
+          </div>
+        </div>
+
+        <div className="panel span-2">
+          <PanelHeader title="3. 标签确认" text="第一版支持手动编辑 captions；后续可接 WD14 和 LLM 清洗。" button={<button className="small-button" onClick={saveCaptions} disabled={!captions.length || busy}>保存标签</button>} />
+          <div className="caption-editor-list">
+            {captions.length ? captions.map((caption, index) => (
+              <label key={caption.filename}>
+                <span>{caption.filename}</span>
+                <textarea value={caption.caption} onChange={(event) => {
+                  const next = captions.slice();
+                  next[index] = { ...caption, caption: event.target.value };
+                  setCaptions(next);
+                }} />
+              </label>
+            )) : <div className="empty-state">上传素材并完成体检后会生成可编辑标签。</div>}
+          </div>
+        </div>
+
+        <div className="panel">
+          <PanelHeader title="4. 开始炼制" text="高级参数会自动从策略生成，必要时可以去项目 JSON 或后续高级模式调整。" />
+          <button className="wide secondary-action" onClick={createPlan} disabled={!project || busy}>生成训练配置</button>
+          {plan && (
+            <div className="decision-list">
+              <div><span>Resolution</span><strong>{plan.resolution}</strong></div>
+              <div><span>Repeats / Epochs</span><strong>{plan.repeats} / {plan.epochs}</strong></div>
+              <div><span>LR</span><strong>{plan.learning_rate}</strong></div>
+              <div><span>Dim / Alpha</span><strong>{plan.network_dim} / {plan.network_alpha}</strong></div>
+            </div>
+          )}
+          <button className="wide primary-action" onClick={startTraining} disabled={!plan || busy}>开始训练</button>
+          {task && <GenerationLoading task={task} plan={task.plan} />}
+        </div>
+
+        <div className="panel span-3">
+          <PanelHeader title="5. 试画与保存" text="训练完成后会给出推荐使用强度、召唤名字和示例 prompt。" button={<button className="small-button" onClick={installLora} disabled={!trained || busy}>安装到 models/Lora</button>} />
+          {trained ? (
+            <div className="trained-lora-result">
+              <div><strong>{trained.filename}</strong><span>{trained.path}</span></div>
+              <div><strong>推荐使用强度</strong><span>{trained.recommendedWeight}</span></div>
+              <div><strong>召唤名字</strong><span>{trained.triggerWord}</span></div>
+              <div><strong>示例</strong><span>{trained.promptExample}</span></div>
+            </div>
+          ) : (
+            <div className="empty-state">训练成功后会在这里显示可安装的 LoRA。</div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function GenerationAssetGrid({ items, selected, selectedIds = [], onSelect, onToggleSelect }) {
+  return (
+    <div className="asset-grid">
+      {items.map((item) => (
+        <div
+          key={`${item.generationId || "image"}-${item.url}`}
+          className={selected?.url === item.url ? "asset-tile selected" : "asset-tile"}
+        >
+          <button className="asset-tile-image" onClick={() => onSelect(item)}>
+            <img src={item.url} alt={item.filename || "generated asset"} />
+          </button>
+          <div className="asset-tile-foot">
+            <label className="asset-check">
+              <input type="checkbox" checked={selectedIds.includes(item.generationId)} onChange={() => onToggleSelect?.(item.generationId)} />
+              <span>{item.favorite ? "★" : " "}</span>
+            </label>
+            <span>{formatAssetLabel(item)}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GenerationAssetInspector({ item, onOpenFolder, onDelete, onReuse, onFixedSeed, onToggleFavorite, onPurposeChange }) {
+  const plan = item.plan || {};
+  const [purposeDraft, setPurposeDraft] = useState(item.purpose || "");
+
+  useEffect(() => {
+    setPurposeDraft(item.purpose || "");
+  }, [item.generationId, item.purpose]);
+
+  return (
+    <div className="asset-inspector">
+      <div className="asset-preview-large">
+        <img src={item.url} alt={item.filename || "selected generation"} />
+      </div>
+      <div className="asset-action-row">
+        <a className="small-button" href={item.url} target="_blank" rel="noreferrer">打开大图</a>
+        <button className="small-button" onClick={onOpenFolder} disabled={!item.generationId}>本地打开</button>
+        {onReuse && <button className="small-button" onClick={() => onReuse(item)}>复用参数</button>}
+        {onFixedSeed && <button className="small-button" onClick={() => onFixedSeed(item)}>固定 seed</button>}
+        {onToggleFavorite && <button className="small-button" onClick={onToggleFavorite}>{item.favorite ? "取消收藏" : "收藏"}</button>}
+        {onDelete && <button className="small-button danger-button" onClick={onDelete}>删除</button>}
+      </div>
+      {onPurposeChange && (
+        <label className="asset-purpose-field">
+          <span>用途 / 标记</span>
+          <input
+            value={purposeDraft}
+            onChange={(event) => setPurposeDraft(event.target.value)}
+            onBlur={() => onPurposeChange(purposeDraft)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+            placeholder="头像、壁纸、待精修..."
+          />
+        </label>
+      )}
+      <div className="asset-meta-list">
+        <div><strong>文件</strong><span>{item.filename || "-"}</span></div>
+        <div><strong>模型</strong><span>{plan.checkpoint || item.checkpoint || "-"}</span></div>
+        <div><strong>尺寸</strong><span>{sizeSummary(plan)}</span></div>
+        <div><strong>Seed</strong><span>{plan.seed ?? item.seed ?? "-"}</span></div>
+      </div>
+      <div className="asset-prompt-box">
+        <strong>Prompt</strong>
+        <p>{plan.positive_prompt || item.prompt || "-"}</p>
+      </div>
+    </div>
+  );
+}
+
+function RenderResultCard({ item, onOpenFolder, onReuse, onFixedSeed }) {
+  const plan = item.plan || {};
+  return (
+    <div className="render-result-card">
+      <a className="render-preview-link" href={item.url} target="_blank" rel="noreferrer" aria-label="打开大图">
+        <img src={item.url} alt={item.filename || "latest generation"} />
+      </a>
+      <div className="render-result-meta">
+        <strong>{item.filename || "generation.png"}</strong>
+        <span>{sizeSummary(plan)} · seed {plan.seed ?? item.seed ?? "-"}</span>
+      </div>
+      <div className="render-result-actions">
+        <a href={item.url} target="_blank" rel="noreferrer">大图</a>
+        <button onClick={onOpenFolder} disabled={!item.generationId}>本地</button>
+        <button onClick={onReuse}>复用</button>
+        <button onClick={onFixedSeed}>固定 seed</button>
+      </div>
+    </div>
+  );
+}
+
+function GenerationAssetStrip({ items, selected, loading, onRefresh, onSelect, onOpenAssets, title = "素材" }) {
+  return (
+    <div className="asset-strip-panel">
+      <div className="asset-strip-head">
+        <div>
+          <strong>{title}</strong>
+          <span>{items.length ? `${items.length} 张最近素材` : "暂无素材"}</span>
+        </div>
+        <div>
+          <button className="small-button" onClick={onRefresh}>{loading ? "加载中" : "刷新"}</button>
+          <button className="small-button" onClick={onOpenAssets}>素材库</button>
+        </div>
+      </div>
+      {items.length ? (
+        <div className="asset-strip-scroll">
+          {items.slice(0, 12).map((item) => (
+            <button
+              key={`${item.generationId || "image"}-${item.url}`}
+              className={selected?.url === item.url ? "asset-strip-thumb selected" : "asset-strip-thumb"}
+              onClick={() => onSelect(item)}
+            >
+              <img src={item.url} alt={item.filename || "generated asset"} />
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="asset-strip-empty">生成结果会自动保存到素材库。</div>
+      )}
     </div>
   );
 }
@@ -1237,6 +1997,15 @@ function ModelsScreen({ checkpoints, webuiOnline, resources: initialResources, s
   const [resources, setResources] = useState(initialResources);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState("checkpoint");
+  const [installFiles, setInstallFiles] = useState([]);
+  const [installPath, setInstallPath] = useState("");
+  const [installing, setInstalling] = useState(false);
+  const [draggingInstall, setDraggingInstall] = useState(false);
+  const [installResult, setInstallResult] = useState(null);
+  const [controlNetPresets, setControlNetPresets] = useState([]);
+  const [controlNetExtension, setControlNetExtension] = useState(null);
+  const [controlNetPath, setControlNetPath] = useState("");
+  const [controlNetTask, setControlNetTask] = useState(null);
 
   useEffect(() => {
     if (initialResources) {
@@ -1244,7 +2013,14 @@ function ModelsScreen({ checkpoints, webuiOnline, resources: initialResources, s
     } else {
       loadResources();
     }
+    loadControlNetPresets();
   }, [initialResources]);
+
+  useEffect(() => {
+    if (!controlNetTask || !isTaskActive(controlNetTask)) return undefined;
+    const timer = window.setInterval(() => pollControlNetTask(controlNetTask.id), 1500);
+    return () => window.clearInterval(timer);
+  }, [controlNetTask?.id, controlNetTask?.status]);
 
   async function loadResources({ scan = false } = {}) {
     try {
@@ -1258,6 +2034,66 @@ function ModelsScreen({ checkpoints, webuiOnline, resources: initialResources, s
     }
   }
 
+  async function loadControlNetPresets() {
+    try {
+      const response = await apiGet("/api/controlnet/presets");
+      setControlNetPresets(response.presets || []);
+      setControlNetExtension(response.extension || null);
+    } catch {
+      setControlNetPresets([]);
+      setControlNetExtension(null);
+    }
+  }
+
+  async function installControlNetExtension() {
+    try {
+      setError("");
+      const response = await apiPost("/api/controlnet/extension/install", {});
+      setControlNetTask(response.task);
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    }
+  }
+
+  async function installControlNetPreset(id) {
+    try {
+      setError("");
+      const response = await apiPost(`/api/controlnet/presets/${encodeURIComponent(id)}/install`, {});
+      setControlNetTask(response.task);
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    }
+  }
+
+  async function pollControlNetTask(id) {
+    try {
+      const response = await apiGet(`/api/tasks/${id}`);
+      setControlNetTask(response.task);
+      if (!isTaskActive(response.task)) {
+        await loadResources({ scan: true });
+        await loadControlNetPresets();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  async function importControlNet() {
+    if (!controlNetPath.trim()) {
+      setError("请输入本地 ControlNet 模型路径。");
+      return;
+    }
+    try {
+      setError("");
+      await apiPost("/api/controlnet/import", { path: controlNetPath.trim() });
+      setControlNetPath("");
+      await loadResources({ scan: true });
+      await loadControlNetPresets();
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    }
+  }
+
   async function updateProfile(profile, patch) {
     try {
       setError("");
@@ -1266,6 +2102,80 @@ function ModelsScreen({ checkpoints, webuiOnline, resources: initialResources, s
       setAppResources?.(response.resources);
     } catch (error) {
       setError(error.message);
+    }
+  }
+
+  function addInstallFiles(fileList) {
+    const nextFiles = Array.from(fileList || [])
+      .map((file) => ({
+        name: file.name,
+        path: file.path || file.webkitRelativePath || "",
+        file,
+        type: defaultInstallTypeForActiveTab(activeTab) || inferInstallTypeForUi(file.name || file.path || ""),
+      }))
+      .filter((file) => file.name || file.path);
+    setInstallResult(null);
+    setInstallFiles((current) => [...current, ...nextFiles].filter((file, index, all) => (
+      all.findIndex((item) => (item.path || item.name) === (file.path || file.name)) === index
+    )));
+  }
+
+  function updateInstallFileType(key, type) {
+    setInstallFiles((current) => current.map((file) => (
+      (file.path || file.name) === key ? { ...file, type } : file
+    )));
+  }
+
+  async function installResources() {
+    const manualPaths = installPath.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    const manualFiles = manualPaths.map((path) => ({
+      path,
+      name: path.split(/[\\/]/).pop() || path,
+      type: defaultInstallTypeForActiveTab(activeTab) || inferInstallTypeForUi(path),
+    }));
+    const uploadedFiles = await Promise.all(installFiles
+      .filter((file) => file.file && !file.path)
+      .map(async (file) => {
+        const payload = await fileToDataUrlPayload(file.file);
+        return {
+          name: file.name,
+          type: file.type,
+          size: payload.size,
+          dataUrl: payload.dataUrl,
+        };
+      }));
+    const files = [
+      ...installFiles.filter((file) => file.path),
+      ...uploadedFiles,
+      ...manualFiles,
+    ].filter((file) => file.path || file.dataUrl);
+
+    if (!files.length) {
+      setError("请选择模型文件，或粘贴本地文件路径。");
+      return;
+    }
+    const unresolved = files.filter((file) => !file.type && isAmbiguousResourceExtension(file.name || file.path || ""));
+    if (unresolved.length) {
+      setError(`请选择模型类型后再安装：${unresolved.map((file) => file.name || file.path).join(", ")}`);
+      return;
+    }
+
+    try {
+      setInstalling(true);
+      setError("");
+      setInstallResult(null);
+      const installType = ["checkpoint", "lora", "vae", "controlnet"].includes(activeTab) ? activeTab : "";
+      const response = await apiPost("/api/resources/install", { files, type: installType || undefined });
+      setResources(response.resources);
+      setAppResources?.(response.resources);
+      setInstallFiles([]);
+      setInstallPath("");
+      setInstallResult(response.installed || []);
+      await refreshStatus();
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setInstalling(false);
     }
   }
 
@@ -1282,14 +2192,114 @@ function ModelsScreen({ checkpoints, webuiOnline, resources: initialResources, s
     : profiles.filter((profile) => profile.type === activeTab);
 
   return (
-    <section className="screen active">
-      <div className="panel full-panel">
+    <section className="screen active models-page">
+      <div className="panel full-panel resource-manager-panel">
         <PanelHeader
           title="模型资源兼容性"
           text="管理 Checkpoint、LoRA、VAE、ControlNet 的架构类型和兼容规则。"
           button={<button className="primary-action" onClick={() => loadResources({ scan: true })}>刷新索引</button>}
         />
         {error && <div className="inline-error">{error}</div>}
+        <div
+          className={`resource-install-drop ${draggingInstall ? "dragging" : ""}`}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDraggingInstall(true);
+          }}
+          onDragLeave={() => setDraggingInstall(false)}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDraggingInstall(false);
+            addInstallFiles(event.dataTransfer.files);
+          }}
+        >
+          <div className="resource-install-copy">
+            <strong>安装本地模型资源</strong>
+            <span>拖入或选择 checkpoint、LoRA、VAE、ControlNet 文件，系统会自动识别类型并复制到对应目录。</span>
+            <small>目录：{resourceInstallTargetsText(resources)}</small>
+          </div>
+          <div className="resource-install-controls">
+            <label className="small-button file-button">
+              选择文件
+              <input
+                type="file"
+                multiple
+                accept={resourceAcceptExtensions()}
+                onChange={(event) => {
+                  addInstallFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+            <button className="small-button" onClick={installResources} disabled={installing}>{installing ? "安装中" : "安装"}</button>
+          </div>
+          <textarea
+            className="resource-install-paths"
+            value={installPath}
+            onChange={(event) => setInstallPath(event.target.value)}
+            placeholder="浏览器无法读取文件路径时，可每行粘贴一个本地文件路径"
+          />
+          <div className="resource-install-list">
+            {installFiles.length ? installFiles.map((file) => (
+              <span key={file.path || file.name} className="resource-install-item">
+                <strong>{file.name}</strong>
+                <select value={file.type || ""} onChange={(event) => updateInstallFileType(file.path || file.name, event.target.value)}>
+                  <option value="">选择类型</option>
+                  {resourceInstallTypeOptions().map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </span>
+            )) : <span>未选择文件</span>}
+          </div>
+          {installResult?.length ? (
+            <div className="resource-install-result">
+              已安装 {installResult.length} 个资源：{installResult.map((item) => `${item.name} (${item.type})`).join(", ")}
+            </div>
+          ) : null}
+        </div>
+        <div className="controlnet-resource-center">
+          <div className="controlnet-resource-head">
+            <div>
+              <strong>ControlNet 参考控制资源</strong>
+              <span>先安装和管理 OpenPose、Lineart、Depth、Canny，不训练 ControlNet 模型。</span>
+            </div>
+            <button className="small-button" onClick={() => { loadControlNetPresets(); loadResources({ scan: true }); }}>刷新</button>
+          </div>
+          {controlNetExtension && !controlNetExtension.installed && (
+            <div className="controlnet-repair-banner">
+              <div>
+                <strong>{controlNetExtension.partial ? "ControlNet 扩展安装不完整" : "未检测到 ControlNet 扩展"}</strong>
+                <span>系统可以自动安装 `sd-webui-controlnet`。安装完成后需要重启 A1111 才会生效。</span>
+              </div>
+              <button className="small-button" onClick={installControlNetExtension} disabled={isTaskActive(controlNetTask)}>自动修复</button>
+            </div>
+          )}
+          {controlNetExtension?.installed && (
+            <div className="controlnet-repair-banner ready">
+              <div>
+                <strong>ControlNet 扩展已安装</strong>
+                <span>{controlNetExtension.path}</span>
+              </div>
+            </div>
+          )}
+          {controlNetTask && <GenerationLoading task={controlNetTask} plan={controlNetTask.plan} />}
+          <div className="controlnet-preset-grid">
+            {controlNetPresets.map((preset) => (
+              <div key={preset.id} className={`controlnet-preset ${preset.installed ? "installed" : ""}`}>
+                <div>
+                  <strong>{preset.displayName}</strong>
+                  <span>{preset.name} · {preset.purpose} · {String(preset.baseType || "").toUpperCase()}</span>
+                </div>
+                <button className="small-button" onClick={() => installControlNetPreset(preset.id)} disabled={preset.installed || isTaskActive(controlNetTask)}>
+                  {preset.installed ? "已安装" : "安装"}
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="compact-import">
+            <input value={controlNetPath} onChange={(event) => setControlNetPath(event.target.value)} placeholder="/path/to/control_v11p_sd15_openpose.pth" />
+            <button className="small-button" onClick={importControlNet}>导入本地 ControlNet</button>
+          </div>
+        </div>
         <div className="resource-tabs">
           {tabs.map(([key, label]) => (
             <button key={key} className={activeTab === key ? "active" : ""} onClick={() => setActiveTab(key)}>
@@ -1456,12 +2466,12 @@ function QueueScreen() {
     <section className="screen active">
       <div className="workspace-grid queue-grid">
         <div className="panel span-2">
-          <PanelHeader title="任务队列" text="生成任务已持久化到本地，可取消、失败重试、查看进度。" button={<button className="small-button" onClick={loadTasks}>刷新</button>} />
+          <PanelHeader title="任务队列" text="画图、资产炼制和资源安装任务都会持久化到本地，可取消、失败重试、查看进度。" button={<button className="small-button" onClick={loadTasks}>刷新</button>} />
           {error && <div className="inline-error">{error}</div>}
           <div className="queue-list">
             {tasks.length ? tasks.map((task) => (
               <div key={task.id} className={`queue-item ${isTaskActive(task) ? "running" : ""}`}>
-                <strong>{task.plan?.task_type || "txt2img"} · {task.plan?.checkpoint || "未选择模型"}</strong>
+                <strong>{taskTitle(task)}</strong>
                 <span>{task.progressLabel || task.error || formatDateTime(task.createdAt)}</span>
                 <em>{task.status} · {Math.round((task.progress || 0) * 100)}%</em>
                 <div className="queue-actions">
@@ -1470,7 +2480,7 @@ function QueueScreen() {
                 </div>
               </div>
             )) : (
-              <div className="queue-item"><strong>暂无任务</strong><span>在自然语言生图页点击生成后会出现在这里</span><em>idle</em></div>
+              <div className="queue-item"><strong>暂无任务</strong><span>画图、炼制资产或安装 ControlNet 后会出现在这里</span><em>idle</em></div>
             )}
           </div>
         </div>
@@ -1485,7 +2495,7 @@ function QueueScreen() {
         </div>
         <div className="panel span-3">
           <PanelHeader title="任务日志" />
-          <pre className="log-box">{tasks.slice(0, 8).map((task) => `[${task.status}] ${formatDateTime(task.updatedAt)} · ${task.progressLabel || task.error || task.id}`).join("\n") || "[idle] 等待生成任务"}</pre>
+          <pre className="log-box">{tasks.slice(0, 8).flatMap(taskLogLines).join("\n") || "[idle] 等待任务"}</pre>
         </div>
       </div>
     </section>
@@ -1504,6 +2514,9 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
   const [libraryModels, setLibraryModels] = useState([]);
   const [librarySource, setLibrarySource] = useState("");
   const [modelInfo, setModelInfo] = useState(null);
+  const [installTask, setInstallTask] = useState(null);
+  const [kohya, setKohya] = useState(null);
+  const [kohyaTask, setKohyaTask] = useState(null);
   const [pullConfirmModel, setPullConfirmModel] = useState("");
   const [pullTask, setPullTask] = useState(null);
   const [runtimeSettings, setRuntimeSettings] = useState({ lowPerformanceMode: false });
@@ -1520,6 +2533,12 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
 
   useEffect(() => {
     void loadPullTasks();
+    void loadInstallTask();
+    void loadKohyaTask();
+    const timer = window.setInterval(() => {
+      void loadBackgroundLocalTasks();
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -1529,6 +2548,22 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
     }, 1000);
     return () => window.clearInterval(timer);
   }, [pullTask?.id, pullTask?.status]);
+
+  useEffect(() => {
+    if (!installTask || !["queued", "running"].includes(installTask.status)) return undefined;
+    const timer = window.setInterval(() => {
+      void refreshInstallTask();
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [installTask?.id, installTask?.status]);
+
+  useEffect(() => {
+    if (!kohyaTask || !["queued", "running"].includes(kohyaTask.status)) return undefined;
+    const timer = window.setInterval(() => {
+      void refreshKohyaTask();
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [kohyaTask?.id, kohyaTask?.status]);
 
   useEffect(() => {
     if (!providerModalOpen) return undefined;
@@ -1541,14 +2576,16 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
 
   async function loadProviderData() {
     try {
-      const [providerResponse, localResponse, settingsResponse] = await Promise.all([
+      const [providerResponse, localResponse, kohyaResponse, settingsResponse] = await Promise.all([
         apiGet("/api/providers"),
         apiGet("/api/local-llm/status").catch(() => null),
+        apiGet("/api/kohya/status").catch(() => null),
         apiGet("/api/settings/runtime").catch(() => null),
       ]);
       setProviders(providerResponse.providers || []);
       setStatus(providerResponse.active || providerStatus || null);
       setLocalLlm(localResponse);
+      setKohya(kohyaResponse);
       setSelectedLocalModel((current) => resolveSelectedLocalModel(current, providerResponse.active || providerStatus, localResponse));
       if (settingsResponse?.settings) setRuntimeSettings(settingsResponse.settings);
       setError("");
@@ -1681,6 +2718,90 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
     }
   }
 
+  async function loadBackgroundLocalTasks() {
+    await Promise.all([
+      loadPullTasks(),
+      loadInstallTask(),
+      loadKohyaTask(),
+    ]);
+  }
+
+  async function loadInstallTask() {
+    try {
+      const response = await apiGet("/api/local-llm/install");
+      setInstallTask(response.task || null);
+    } catch {
+      setInstallTask(null);
+    }
+  }
+
+  async function refreshInstallTask() {
+    try {
+      const response = await apiGet("/api/local-llm/install");
+      setInstallTask(response.task || null);
+      if (["succeeded", "failed"].includes(response.task?.status)) {
+        await loadProviderData();
+      }
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
+  async function installOllama() {
+    try {
+      setBusy("ollama-install");
+      setError("");
+      const response = await apiPost("/api/local-llm/install", {});
+      setInstallTask(response.task || null);
+      if (["succeeded", "failed"].includes(response.task?.status)) {
+        await loadProviderData();
+      }
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function loadKohyaTask() {
+    try {
+      const response = await apiGet("/api/kohya/install");
+      setKohyaTask(response.task || null);
+    } catch {
+      setKohyaTask(null);
+    }
+  }
+
+  async function refreshKohyaTask() {
+    try {
+      const response = await apiGet("/api/kohya/install");
+      setKohyaTask(response.task || null);
+      if (["succeeded", "failed"].includes(response.task?.status)) {
+        const statusResponse = await apiGet("/api/kohya/status").catch(() => null);
+        setKohya(statusResponse);
+      }
+    } catch (error) {
+      setError(error.message);
+    }
+  }
+
+  async function installKohya() {
+    try {
+      setBusy("kohya-install");
+      setError("");
+      const response = await apiPost("/api/kohya/install", {});
+      setKohyaTask(response.task || null);
+      if (["succeeded", "failed"].includes(response.task?.status)) {
+        const statusResponse = await apiGet("/api/kohya/status").catch(() => null);
+        setKohya(statusResponse);
+      }
+    } catch (error) {
+      setError(readApiErrorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function refreshPullTask(id) {
     if (!id) return;
     try {
@@ -1806,6 +2927,7 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
   async function refreshAllSettings() {
     await Promise.all([
       loadProviderData(),
+      loadBackgroundLocalTasks(),
       refreshStatus ? refreshStatus() : Promise.resolve(),
     ]);
   }
@@ -1814,6 +2936,7 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
   const sections = [
     { id: "providers", title: "大模型 Provider", desc: "提示词规划与任务解析" },
     { id: "local", title: "本地大模型", desc: "Ollama 与 Gemma 状态" },
+    { id: "training", title: "LoRA 训练器", desc: "kohya_ss 状态与安装" },
     { id: "runtime", title: "性能与显存", desc: "省显存运行策略" },
     { id: "image", title: "生图后端", desc: "A1111 连接与模型目录" },
     { id: "diagnostics", title: "系统诊断", desc: "服务状态与刷新" },
@@ -1864,11 +2987,12 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
               libraryModels={libraryModels}
               librarySource={librarySource}
               modelInfo={modelInfo}
+              installTask={installTask}
               pullConfirmModel={pullConfirmModel}
               pullTask={pullTask}
               status={status}
               busy={busy}
-              onRefresh={loadProviderData}
+              onRefresh={refreshAllSettings}
               onModelChange={(model) => {
                 setSelectedLocalModel(model);
                 setPullConfirmModel("");
@@ -1877,6 +3001,7 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
               onSearchLibrary={searchLibrary}
               onInspectModel={inspectLocalModel}
               onPullModel={pullSelectedModel}
+              onInstallOllama={installOllama}
               onDeleteModel={deleteLocalModel}
               onCreateLocalProvider={createLocalProvider}
               onTest={() => testProvider()}
@@ -1892,6 +3017,15 @@ function SettingsScreen({ providerName, backendOnline, providerStatus, health, e
                 setRuntimeSettings(nextSettings);
                 void saveRuntimeSettings(nextSettings);
               }}
+            />
+          )}
+          {activeSection === "training" && (
+            <KohyaSettingsPanel
+              kohya={kohya}
+              task={kohyaTask}
+              busy={busy}
+              onInstall={installKohya}
+              onRefresh={refreshAllSettings}
             />
           )}
           {activeSection === "image" && <ImageBackendSettingsPanel a1111={a1111} />}
@@ -2001,7 +3135,75 @@ function ProviderModal({ mode, form, busy, onClose, onSave, onFormChange }) {
   );
 }
 
-function LocalLlmSettingsPanel({ localLlm, selectedModel, libraryQuery, libraryModels, librarySource, modelInfo, pullConfirmModel, pullTask, status, busy, onRefresh, onModelChange, onLibraryQueryChange, onSearchLibrary, onInspectModel, onPullModel, onDeleteModel, onCreateLocalProvider, onTest }) {
+function KohyaSettingsPanel({ kohya, task, busy, onInstall, onRefresh }) {
+  const ready = Boolean(kohya?.ready || kohya?.installed);
+  const installing = task && ["queued", "running"].includes(task.status);
+  const gitOk = kohya?.commands?.git?.available;
+  const pythonOk = kohya?.commands?.python?.available;
+  const uvOk = kohya?.commands?.uv?.available;
+  return (
+    <div className="panel settings-section-card settings-wide kohya-settings-panel">
+      <PanelHeader
+        title="LoRA 训练器"
+        text={ready ? "kohya_ss 已就绪，普通 LoRA 炼制流程可以直接启动训练任务。" : "安装后，LoRA 项目会自动调用 kohya_ss 完成训练。"}
+        button={<button className="small-button" onClick={onRefresh} disabled={Boolean(busy)}>刷新</button>}
+      />
+
+      <div className={`kohya-readiness-banner ${ready ? "ready" : "missing"}`}>
+        <div>
+          <span>当前状态</span>
+          <strong>{ready ? "可以炼制 LoRA" : "需要安装 kohya_ss"}</strong>
+        </div>
+        <button className="primary-action" onClick={onInstall} disabled={Boolean(busy) || installing}>
+          {busy === "kohya-install" ? "创建任务中" : installing ? "安装中" : ready ? "重新检查 / 更新" : "一键安装 kohya_ss"}
+        </button>
+      </div>
+
+      <div className="provider-matrix roomy">
+        <div><strong>安装位置</strong><span>{kohya?.detectedPath || kohya?.bundledPath || "-"}</span></div>
+        <div><strong>训练脚本</strong><span>{kohya?.trainScript || "未找到"}</span></div>
+        <div><strong>虚拟环境</strong><span>{kohya?.venvPath || "-"}</span></div>
+        <div><strong>仓库版本</strong><span>{kohya?.repo?.commit ? `${kohya.repo.branch || "main"} · ${kohya.repo.commit}` : "未安装"}</span></div>
+      </div>
+
+      {!ready && (
+        <div className="ollama-install-callout kohya-callout">
+          <div>
+            <strong>{kohya?.error || "kohya_ss 未就绪"}</strong>
+            <span>安装器会下载官方仓库、创建独立 Python 虚拟环境、安装依赖，并写入 {kohya?.envLine || "KOHYA_SS_PATH=vendor/engines/kohya_ss"}。</span>
+          </div>
+        </div>
+      )}
+
+      {task && (
+        <div className={`model-pull-task install-task ${task.status}`}>
+          <div className="model-pull-task-head">
+            <div>
+              <strong>kohya_ss 后台任务 · {kohyaInstallMethodLabel(task)}</strong>
+              <span>{kohyaInstallStatusLabel(task)}</span>
+            </div>
+            <strong>{Math.round(task.progress || 0)}%</strong>
+          </div>
+          <div className="model-pull-progress"><span style={{ width: `${Math.max(0, Math.min(100, task.progress || 0))}%` }} /></div>
+          {task.error ? <div className="model-pull-error">{task.error}</div> : null}
+          {task.logs?.length ? (
+            <div className="kohya-log-lines">
+              {task.logs.slice(-5).map((line, index) => <small key={`${line}-${index}`}>{line}</small>)}
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      <div className="runtime-status-grid">
+        <DiagnosticCard title="git" value={gitOk ? "可用" : "缺失"} detail={kohya?.commands?.git?.version || kohya?.commands?.git?.error || "用于下载 kohya_ss"} ok={gitOk} />
+        <DiagnosticCard title="Python" value={pythonOk ? "可用" : "缺失"} detail={kohya?.commands?.python?.version || kohya?.commands?.python?.error || "用于训练环境"} ok={pythonOk} />
+        <DiagnosticCard title="uv" value={uvOk ? "可用" : "可选"} detail={kohya?.commands?.uv?.version || "未安装时回退到 python venv + pip"} ok={uvOk || pythonOk} />
+      </div>
+    </div>
+  );
+}
+
+function LocalLlmSettingsPanel({ localLlm, selectedModel, libraryQuery, libraryModels, librarySource, modelInfo, installTask, pullConfirmModel, pullTask, status, busy, onRefresh, onModelChange, onLibraryQueryChange, onSearchLibrary, onInspectModel, onPullModel, onInstallOllama, onDeleteModel, onCreateLocalProvider, onTest }) {
   const models = Array.isArray(localLlm?.models) ? localLlm.models : [];
   const installedModels = Array.isArray(localLlm?.installedModels) && localLlm.installedModels.length
     ? localLlm.installedModels
@@ -2012,6 +3214,9 @@ function LocalLlmSettingsPanel({ localLlm, selectedModel, libraryQuery, libraryM
   const activeLocalModel = status?.type === "local" ? status?.model : "";
   const selectedTag = modelInfo?.tags?.find((tag) => tag.name === selectValue) || modelInfo?.selectedTag;
   const pulling = pullTask && ["queued", "running"].includes(pullTask.status);
+  const installing = installTask && ["queued", "running"].includes(installTask.status);
+  const needsInstallAction = !localLlm?.installed || !localLlm?.serviceOnline;
+  const installButtonLabel = !localLlm?.installed ? "安装并启动 Ollama" : "启动 Ollama";
   return (
     <div className="panel settings-section-card">
       <PanelHeader title="本地大模型" text={localLlm?.serviceOnline ? "Ollama 服务在线，可管理已安装模型并创建本地 Provider。" : "使用 Ollama 提供本地 OpenAI-compatible 接口。"} button={<button className="small-button" onClick={onRefresh}>刷新</button>} />
@@ -2021,6 +3226,36 @@ function LocalLlmSettingsPanel({ localLlm, selectedModel, libraryQuery, libraryM
         <div><strong>已安装模型</strong><span>{models.length ? `${models.length} 个模型` : "未检测到模型"}</span></div>
         <div><strong>当前 Provider</strong><span>{status?.name || status?.type || "环境变量"}</span></div>
       </div>
+      {needsInstallAction && (
+        <div className="ollama-install-callout">
+          <div>
+            <strong>{localLlm?.installed ? "Ollama 已安装但服务离线" : "未检测到 Ollama"}</strong>
+            <span>{localLlm?.installed ? "启动本地服务后才能搜索、拉取和运行 Ollama 模型。" : "可在本机安装 Ollama。此操作不会自动下载 Gemma 或其他模型。"}</span>
+          </div>
+          <button className="primary-action" onClick={onInstallOllama} disabled={Boolean(busy) || installing}>
+            {busy === "ollama-install" ? "创建任务中" : installing ? "处理中" : installButtonLabel}
+          </button>
+        </div>
+      )}
+      {installTask && (
+        <div className={`model-pull-task install-task ${installTask.status}`}>
+          <div className="model-pull-task-head">
+            <div>
+              <strong>Ollama 后台任务 · {installMethodLabel(installTask)}</strong>
+              <span>{installStatusLabel(installTask)}</span>
+            </div>
+            <strong>{Math.round(installTask.progress || 0)}%</strong>
+          </div>
+          <div className="model-pull-progress"><span style={{ width: `${Math.max(0, Math.min(100, installTask.progress || 0))}%` }} /></div>
+          {installTask.error ? (
+            <div className="model-pull-error">
+              {installTask.error}
+              {installTask.helpUrl ? <a href={installTask.helpUrl} target="_blank" rel="noreferrer">打开手动安装页</a> : null}
+            </div>
+          ) : null}
+          {installTask.logs?.length ? <small>{installTask.logs.slice(-1)[0]}</small> : null}
+        </div>
+      )}
       <div className="local-model-table" role="table">
         <div className="local-model-row head" role="row">
           <span>模型</span>
@@ -2112,7 +3347,7 @@ function LocalLlmSettingsPanel({ localLlm, selectedModel, libraryQuery, libraryM
         <div className={`model-pull-task ${pullTask.status}`}>
           <div className="model-pull-task-head">
             <div>
-              <strong>{pullTask.model}</strong>
+              <strong>后台拉取 · {pullTask.model}</strong>
               <span>{pullStatusLabel(pullTask)}</span>
             </div>
             <strong>{Math.round(pullTask.progress || 0)}%</strong>
@@ -2134,6 +3369,32 @@ function pullStatusLabel(task = {}) {
   if (task.status === "succeeded") return "下载完成";
   if (task.status === "failed") return task.progressLabel || "下载失败";
   return task.progressLabel || task.statusText || "下载中";
+}
+
+function installStatusLabel(task = {}) {
+  if (task.status === "succeeded") return task.progressLabel || "安装完成";
+  if (task.status === "failed") return task.progressLabel || "安装失败";
+  return task.progressLabel || task.statusText || "处理中";
+}
+
+function installMethodLabel(task = {}) {
+  if (task.installMethod === "homebrew") return "Homebrew 安装";
+  if (task.installMethod === "winget") return "winget 安装";
+  if (task.installMethod === "existing-command") return "启动服务";
+  if (task.installMethod === "existing-service") return "服务在线";
+  return task.platform || "安装";
+}
+
+function kohyaInstallStatusLabel(task = {}) {
+  if (task.status === "succeeded") return task.progressLabel || "安装完成";
+  if (task.status === "failed") return task.progressLabel || "安装失败";
+  return task.progressLabel || task.statusText || "处理中";
+}
+
+function kohyaInstallMethodLabel(task = {}) {
+  if (task.installMethod === "git+uv") return "git + uv";
+  if (task.installMethod === "git+pip") return "git + pip";
+  return task.installMethod || task.platform || "安装";
 }
 
 function RuntimeSettingsPanel({ settings, busy, localLlm, a1111, onChange }) {
@@ -2353,6 +3614,55 @@ async function apiPost(path, body) {
   return response.json();
 }
 
+function readApiErrorMessage(error) {
+  const message = String(error?.message || "请求失败");
+  try {
+    const parsed = JSON.parse(message);
+    return parsed?.error?.message || message;
+  } catch {
+    return message;
+  }
+}
+
+function fileToDataUrlPayload(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      filename: file.name,
+      name: file.name,
+      size: file.size,
+      dataUrl: String(reader.result || ""),
+    });
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function assetTypeLabel(type) {
+  return {
+    character: "固定角色",
+    style: "画风模板",
+    meme: "表情包角色",
+    outfit: "服装",
+    prop: "道具",
+  }[type] || "创作资产";
+}
+
+function taskTitle(task = {}) {
+  const type = task.plan?.task_type || "txt2img";
+  if (type === "lora_training") return `LoRA 资产炼制 · ${task.result?.project?.projectName || task.plan?.projectId || "项目"}`;
+  if (type === "controlnet_extension_install") return "ControlNet 扩展安装";
+  if (type === "controlnet_install") return `ControlNet 资源安装 · ${task.plan?.presetId || "预设"}`;
+  return `${type} · ${task.plan?.checkpoint || "未选择模型"}`;
+}
+
+function taskLogLines(task = {}) {
+  const lines = [`[${task.status}] ${formatDateTime(task.updatedAt)} · ${task.progressLabel || task.error || task.id}`];
+  const logs = Array.isArray(task.result?.logs) ? task.result.logs.slice(-3) : [];
+  for (const line of logs) lines.push(`  ${line}`);
+  return lines;
+}
+
 async function apiPut(path, body) {
   const response = await fetch(`${API_BASE}${path}`, {
     method: "PUT",
@@ -2373,6 +3683,28 @@ async function apiDelete(path) {
     throw new Error(text || `${path} failed: ${response.status}`);
   }
   return response.json();
+}
+
+async function apiDeleteWithBody(path, body) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `${path} failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function defaultProviderForm(overrides = {}) {
@@ -2423,38 +3755,23 @@ function normalizePlanForUi(plan = {}, checkpoints = []) {
   const baseSize = recommendedBaseSizeForUi(requestedWidth, requestedHeight);
   const width = baseSize.width;
   const height = baseSize.height;
-  let targetWidth = nullableNumber(plan.target_width);
-  let targetHeight = nullableNumber(plan.target_height);
-  if ((!targetWidth || !targetHeight) && (requestedWidth !== width || requestedHeight !== height)) {
-    targetWidth = requestedWidth;
-    targetHeight = requestedHeight;
-  }
-  if (targetWidth === width && targetHeight === height) {
-    targetWidth = null;
-    targetHeight = null;
-  }
-  const hiresFix = normalizeHiresFixForUi({
-    ...plan,
-    width,
-    height,
-    target_width: targetWidth,
-    target_height: targetHeight,
-  });
   return {
     ...defaultPlan,
     ...plan,
     checkpoint,
     width,
     height,
-    target_width: targetWidth,
-    target_height: targetHeight,
+    target_width: null,
+    target_height: null,
     steps: Number(plan.steps || defaultPlan.steps),
     cfg_scale: Number(plan.cfg_scale || defaultPlan.cfg_scale),
     batch_size: Number(plan.batch_size || defaultPlan.batch_size),
     seed: Number.isFinite(Number(plan.seed)) ? Number(plan.seed) : -1,
     lora: normalizeLorasForUi(plan.lora),
-    hires_fix: hiresFix,
-    adetailer: Boolean(plan.adetailer),
+    hires_fix: false,
+    refine: false,
+    upscale: false,
+    adetailer: false,
   };
 }
 
@@ -2464,101 +3781,22 @@ function normalizePlanForRun(plan) {
   const baseSize = recommendedBaseSizeForUi(requestedWidth, requestedHeight);
   const width = baseSize.width;
   const height = baseSize.height;
-  let targetWidth = nullableNumber(plan.target_width);
-  let targetHeight = nullableNumber(plan.target_height);
-  if ((!targetWidth || !targetHeight) && (requestedWidth !== width || requestedHeight !== height)) {
-    targetWidth = requestedWidth;
-    targetHeight = requestedHeight;
-  }
-  if (targetWidth === width && targetHeight === height) {
-    targetWidth = null;
-    targetHeight = null;
-  }
   return {
     ...plan,
     width,
     height,
-    target_width: targetWidth,
-    target_height: targetHeight,
+    target_width: null,
+    target_height: null,
     steps: clampNumber(plan.steps, 1, 80, 8),
     cfg_scale: clampNumber(plan.cfg_scale, 1, 20, 5),
     batch_size: clampNumber(plan.batch_size, 1, 4, 1),
     seed: Number.isFinite(Number(plan.seed)) ? Number(plan.seed) : -1,
     lora: normalizeLorasForUi(plan.lora),
-    hires_fix: normalizeHiresFixForUi({ ...plan, width, height, target_width: targetWidth, target_height: targetHeight }),
-    adetailer: Boolean(plan.adetailer),
+    refine: false,
+    hires_fix: false,
+    upscale: false,
+    adetailer: false,
   };
-}
-
-function normalizeHiresFixForUi(plan = {}) {
-  const source = typeof plan.hires_fix === "object" && plan.hires_fix ? plan.hires_fix : {};
-  const targetWidth = nullableNumber(plan.target_width ?? source.target_width);
-  const targetHeight = nullableNumber(plan.target_height ?? source.target_height);
-  const targetDiffers = Boolean(targetWidth && targetHeight && (targetWidth !== Number(plan.width) || targetHeight !== Number(plan.height)));
-  const enabled = targetDiffers && (plan.hires_fix === true || (source.enabled === true && source.mode !== "resize"));
-  if (!enabled) return false;
-  return {
-    enabled: true,
-    mode: source.mode || "hires",
-    target_width: targetWidth,
-    target_height: targetHeight,
-    denoising_strength: clampNumber(source.denoising_strength, 0, 1, 0.2),
-    upscaler: source.upscaler || "Lanczos",
-    second_pass_steps: clampNumber(source.second_pass_steps, 1, 80, Math.max(10, Math.round(Number(plan.steps || 8) * 0.6))),
-  };
-}
-
-function isHiresEnabled(plan = {}) {
-  return plan.hires_fix === true || plan.hires_fix?.enabled === true;
-}
-
-function nextHiresFix(plan = {}, patch = {}) {
-  if (patch.enabled === false) return false;
-  const targetSize = defaultTargetSizeForUi(plan);
-  const targetWidth = nullableNumber(plan.target_width) || targetSize.width;
-  const targetHeight = nullableNumber(plan.target_height) || targetSize.height;
-  const current = normalizeHiresFixForUi(plan) || {
-    enabled: false,
-    mode: "hires",
-    target_width: targetWidth,
-    target_height: targetHeight,
-    denoising_strength: 0.2,
-    upscaler: "Lanczos",
-    second_pass_steps: Math.max(10, Math.round(Number(plan.steps || 8) * 0.6)),
-  };
-  return { ...current, enabled: true, target_width: targetWidth, target_height: targetHeight, ...patch };
-}
-
-function setHiresEnabled(setPlan, enabled) {
-  setPlan((plan) => {
-    if (!enabled) {
-      return { ...plan, hires_fix: false };
-    }
-    const targetSize = defaultTargetSizeForUi(plan);
-    const next = {
-      ...plan,
-      target_width: nullableNumber(plan.target_width) || targetSize.width,
-      target_height: nullableNumber(plan.target_height) || targetSize.height,
-    };
-    return {
-      ...next,
-      hires_fix: nextHiresFix(next, { enabled: true, target_width: next.target_width, target_height: next.target_height }),
-    };
-  });
-}
-
-function setTargetPlanValue(setPlan, key, value) {
-  setPlan((plan) => {
-    const nextValue = value === "" ? null : Number(value);
-    const next = { ...plan, [key]: Number.isFinite(nextValue) ? nextValue : null };
-    const targetWidth = key === "target_width" ? next.target_width : nullableNumber(next.target_width);
-    const targetHeight = key === "target_height" ? next.target_height : nullableNumber(next.target_height);
-    const shouldEnable = Boolean(targetWidth && targetHeight && (targetWidth !== Number(next.width) || targetHeight !== Number(next.height)));
-    next.hires_fix = shouldEnable && isHiresEnabled(next)
-      ? nextHiresFix({ ...next, target_width: targetWidth, target_height: targetHeight }, { enabled: true, target_width: targetWidth, target_height: targetHeight })
-      : false;
-    return next;
-  });
 }
 
 function nullableNumber(value) {
@@ -2576,29 +3814,20 @@ function recommendedBaseSizeForUi(width = 512, height = 512) {
   return { width: 512, height: 512 };
 }
 
-function defaultTargetSizeForUi(plan = {}) {
-  const base = recommendedBaseSizeForUi(plan.width, plan.height);
-  if (base.width === 512 && base.height === 512) return { width: 768, height: 768 };
-  if (base.width < base.height) return { width: 768, height: 1152 };
-  return { width: 1152, height: 768 };
-}
-
 function sizeSummary(plan = {}) {
   const base = `${plan.width || 512}x${plan.height || 512}`;
-  const targetWidth = plan.target_width || plan.hires_fix?.target_width;
-  const targetHeight = plan.target_height || plan.hires_fix?.target_height;
-  if (!targetWidth || !targetHeight || Number(targetWidth) === Number(plan.width) && Number(targetHeight) === Number(plan.height)) {
-    return `生成 ${base} · 原尺寸输出`;
-  }
-  return isHiresEnabled(plan)
-    ? `生成 ${base} → 高清修复 ${targetWidth}x${targetHeight}`
-    : `生成 ${base} → 普通放大 ${targetWidth}x${targetHeight}`;
+  return `单次生成 ${base}`;
 }
 
 function extractImages(response, plan = null) {
   const outputImages = Array.isArray(response.outputImages) ? response.outputImages : [];
   if (outputImages.length) {
-    return outputImages.map((image) => ({ ...image, url: absoluteUrl(image.url), plan }));
+    return outputImages.map((image) => ({
+      ...image,
+      url: absoluteUrl(image.url),
+      plan,
+      pipelineStages: response.pipelineStages || image.pipelineStages || [],
+    }));
   }
 
   return (response.images || []).map((image, index) => ({
@@ -2616,8 +3845,43 @@ function generationToGalleryItems(generation) {
     url: absoluteUrl(image.url),
     filename: image.filename || `generation-${index + 1}.png`,
     plan: generation.plan,
+    prompt: generation.prompt,
+    checkpoint: generation.checkpoint,
+    seed: generation.seed,
+    width: generation.width,
+    height: generation.height,
+    favorite: Boolean(generation.favorite),
+    purpose: generation.purpose || "",
+    pipelineStages: image.pipelineStages || [],
     createdAt: generation.createdAt,
   }));
+}
+
+function stashPendingAssetReuse(screen, item, options = {}) {
+  try {
+    window.sessionStorage.setItem("museforge.pendingAssetReuse", JSON.stringify({ screen, item, ...options }));
+  } catch {
+    // Session handoff is a UI convenience; direct reuse still works inside the current page.
+  }
+}
+
+function consumePendingAssetReuse(screen) {
+  try {
+    const raw = window.sessionStorage.getItem("museforge.pendingAssetReuse");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.screen !== screen) return null;
+    window.sessionStorage.removeItem("museforge.pendingAssetReuse");
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function formatAssetLabel(item = {}) {
+  const date = formatDateTime(item.createdAt);
+  const name = item.filename || "generation.png";
+  return date ? `${date} · ${name}` : name;
 }
 
 function absoluteUrl(url) {
@@ -2631,6 +3895,14 @@ function imageUrl(image) {
     return image.startsWith("data:") ? image : `data:image/png;base64,${image}`;
   }
   return absoluteUrl(image?.url || "");
+}
+
+function controlReferencePreview(value = "") {
+  const source = String(value || "").trim();
+  if (!source) return "";
+  if (source.startsWith("data:") || /^https?:\/\//i.test(source)) return source;
+  if (source.startsWith("/outputs/")) return absoluteUrl(source);
+  return "";
 }
 
 function generationReference(item, plan) {
@@ -2697,23 +3969,61 @@ function setNumberPlanValue(setPlan, key, value) {
     const requestedWidth = key === "width" ? clampNumber(nextValue, 256, 2048, plan.width || 512) : clampNumber(plan.width, 256, 2048, 512);
     const requestedHeight = key === "height" ? clampNumber(nextValue, 256, 2048, plan.height || 512) : clampNumber(plan.height, 256, 2048, 512);
     const baseSize = recommendedBaseSizeForUi(requestedWidth, requestedHeight);
-    const shouldTarget = requestedWidth !== baseSize.width || requestedHeight !== baseSize.height;
-    const next = {
+    return {
       ...plan,
       width: baseSize.width,
       height: baseSize.height,
-      target_width: shouldTarget ? requestedWidth : null,
-      target_height: shouldTarget ? requestedHeight : null,
-    };
-    return {
-      ...next,
-      hires_fix: shouldTarget && isHiresEnabled(plan) ? nextHiresFix(next, { target_width: next.target_width, target_height: next.target_height }) : false,
+      target_width: null,
+      target_height: null,
+      hires_fix: false,
     };
   });
 }
 
 function checkpointTitle(checkpoint) {
   return checkpoint?.title || checkpoint?.name || "";
+}
+
+function resourceAcceptExtensions() {
+  return ".safetensors,.ckpt,.pt,.pth";
+}
+
+function resourceInstallTypeOptions() {
+  return [
+    ["checkpoint", "Checkpoint"],
+    ["lora", "LoRA"],
+    ["vae", "VAE"],
+    ["controlnet", "ControlNet"],
+  ];
+}
+
+function defaultInstallTypeForActiveTab(tab) {
+  return ["checkpoint", "lora", "vae", "controlnet"].includes(tab) ? tab : "";
+}
+
+function inferInstallTypeForUi(value = "") {
+  const text = String(value || "").toLowerCase().replace(/\\/g, "/");
+  if (/(^|\/)(lora|loras|lycoris|locon)(\/|$)/.test(text) || /(^|[._ -])(lora|lycoris|locon)([._ -]|$)/.test(text)) return "lora";
+  if (/(^|\/)(vae|vae-approx)(\/|$)/.test(text) || /(^|[._ -])(vae|kl-f8|vae-ft)([._ -]|$)/.test(text)) return "vae";
+  if (/(^|\/)(controlnet|control-net|control_net)(\/|$)/.test(text) || /(^|[._ -])(controlnet|control-net|control_net|canny|depth|openpose|lineart|scribble|tile|ip-adapter)([._ -]|$)/.test(text)) return "controlnet";
+  if (/(^|\/)(stable-diffusion|checkpoints?|sd-models?)(\/|$)/.test(text)) return "checkpoint";
+  if (text.endsWith(".pth")) return "controlnet";
+  return "";
+}
+
+function isAmbiguousResourceExtension(value = "") {
+  return /\.(safetensors|ckpt|pt)$/i.test(String(value || ""));
+}
+
+function resourceInstallTargetsText(resources = {}) {
+  const dirs = resources?.a1111?.modelDirs || {};
+  const parts = [
+    dirs.checkpoints ? `Checkpoint: ${dirs.checkpoints}` : "",
+    dirs.loras ? `LoRA: ${dirs.loras}` : "",
+    dirs.vae ? `VAE: ${dirs.vae}` : "",
+    dirs.controlnet ? `ControlNet: ${dirs.controlnet}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "等待后端返回目录";
 }
 
 function loraTitle(lora) {
@@ -2738,6 +4048,27 @@ function normalizeLorasForUi(loras = []) {
   }).filter((lora) => lora.name);
 }
 
+function normalizeControlNetForUi(controlnet = []) {
+  if (!Array.isArray(controlnet)) return [];
+  return controlnet.map((control) => {
+    const name = typeof control === "string"
+      ? control
+      : control?.name || control?.model || control?.filename || "";
+    return {
+      ...(typeof control === "object" ? control : {}),
+      name,
+      model: control?.model || name,
+      image: control?.image || control?.input_image || control?.reference_image || "",
+      module: control?.module || control?.preprocessor || "none",
+      weight: Number.isFinite(Number(control?.weight ?? control?.control_weight)) ? Number(control.weight ?? control.control_weight) : 1,
+      guidance_start: Number.isFinite(Number(control?.guidance_start)) ? Number(control.guidance_start) : 0,
+      guidance_end: Number.isFinite(Number(control?.guidance_end)) ? Number(control.guidance_end) : 1,
+      control_mode: control?.control_mode || "Balanced",
+      pixel_perfect: control?.pixel_perfect !== false,
+    };
+  }).filter((control) => control.name);
+}
+
 function resourceName(resource) {
   return resource?.title || resource?.name || resource?.alias || resource?.filename || "";
 }
@@ -2749,10 +4080,50 @@ function samplerOptions(samplers, currentValue) {
   return [...new Set([currentValue, ...names].filter(Boolean))];
 }
 
+function uniqueValues(values = []) {
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
 function indexedPurpose(resources, type, item) {
   const name = resourceName(item);
   const match = (resources?.index || []).find((resource) => resource.type === type && (resource.name === name || resource.title === name));
   return match?.purpose || "";
+}
+
+function compactParts(parts = []) {
+  return parts.map((part) => String(part || "").trim()).filter(Boolean);
+}
+
+function resourceUsageSummary(resource = {}, type) {
+  const notes = String(resource.notes || "").trim();
+  if (notes) return notes;
+  if (type === "controlnet") {
+    const parts = compactParts([
+      resource.controlType ? `控制类型: ${resource.controlType}` : "",
+      resource.defaultPreprocessor || resource.module ? `预处理: ${resource.defaultPreprocessor || resource.module}` : "",
+      resource.defaultModule ? `模块: ${resource.defaultModule}` : "",
+      resource.baseType && resource.baseType !== "unknown" ? resource.baseType : "",
+    ]);
+    return parts.length ? parts.join(" · ") : "未标注用途，可在资源管理里补充 Notes / Control 类型";
+  }
+  const triggerWords = Array.isArray(resource.triggerWords)
+    ? resource.triggerWords
+    : Array.isArray(resource.trigger_words)
+      ? resource.trigger_words
+      : [];
+  const parts = compactParts([
+    triggerWords.length ? `触发词: ${triggerWords.slice(0, 5).join(", ")}` : "",
+    resource.baseType && resource.baseType !== "unknown" ? resource.baseType : "",
+    Number(resource.defaultWeight || resource.weight) ? `建议权重: ${Number(resource.defaultWeight || resource.weight).toFixed(2)}` : "",
+  ]);
+  return parts.length ? parts.join(" · ") : "未标注用途，可在资源管理里补充 Notes / Trigger";
+}
+
+function resourceOptionLabel(resource = {}, type) {
+  const name = type === "lora" ? loraTitle(resource) : resource.name;
+  const summary = resourceUsageSummary(resource, type);
+  const compactSummary = summary.length > 42 ? `${summary.slice(0, 42)}...` : summary;
+  return compactSummary ? `${name} · ${compactSummary}` : name;
 }
 
 function validatePlanForUi(plan = {}, resources = {}) {
@@ -2778,6 +4149,9 @@ function validatePlanForUi(plan = {}, resources = {}) {
     const profile = findResourceProfile(profiles, "controlnet", name);
     if (!profile) issues.push({ code: "CONTROLNET_NOT_FOUND", message: `ControlNet not indexed: ${name}`, resourceName: name });
     else if (!resourceCompatible(profile, checkpoint)) issues.push({ code: "CONTROLNET_INCOMPATIBLE", message: `ControlNet ${profile.name} (${profile.baseType}) 不兼容 ${checkpoint.name} (${checkpoint.baseType})`, resourceName: profile.name });
+    if (!String(control?.image || control?.input_image || control?.reference_image || "").trim()) {
+      issues.push({ code: "CONTROLNET_IMAGE_REQUIRED", message: `ControlNet ${name} 需要参考图`, resourceName: name });
+    }
   }
   const resolvedVae = checkpoint.preferredVae || "Automatic";
   if (resolvedVae && resolvedVae !== "Automatic") {
@@ -2803,10 +4177,31 @@ function compatibleLoraOptions(checkpointName, resources = {}, fallback = []) {
   if (compatible.length) return compatible.map((profile) => ({
     name: profile.name,
     alias: profile.title || profile.name,
+    baseType: profile.baseType,
     defaultWeight: profile.defaultWeight,
     triggerWords: profile.triggerWords,
+    notes: profile.notes,
   }));
   return fallback;
+}
+
+function compatibleControlNetOptions(checkpointName, resources = {}) {
+  const profiles = resources?.profiles || [];
+  const checkpoint = findResourceProfile(profiles, "checkpoint", checkpointName);
+  const compatible = checkpoint
+    ? profiles.filter((profile) => profile.type === "controlnet" && resourceCompatible(profile, checkpoint))
+    : [];
+  return compatible.map((profile) => ({
+    name: profile.name,
+    baseType: profile.baseType,
+    controlType: profile.controlType,
+    model: profile.model,
+    extensionName: profile.extensionName,
+    defaultPreprocessor: profile.defaultPreprocessor || profile.defaultModule || "none",
+    defaultModule: profile.defaultModule || "",
+    defaultControlWeight: profile.defaultControlWeight || 1,
+    notes: profile.notes,
+  }));
 }
 
 function resourceCompatible(profile, checkpoint) {

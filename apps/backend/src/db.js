@@ -45,6 +45,8 @@ db.exec(`
     width INTEGER NOT NULL DEFAULT 512,
     height INTEGER NOT NULL DEFAULT 512,
     rationale TEXT NOT NULL DEFAULT '',
+    favorite INTEGER NOT NULL DEFAULT 0,
+    purpose TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
   );
 
@@ -104,6 +106,9 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 `);
+
+ensureColumn("generations", "favorite", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("generations", "purpose", "TEXT NOT NULL DEFAULT ''");
 
 const defaultAppSettings = Object.freeze({
   lowPerformanceMode: false,
@@ -362,6 +367,25 @@ export function listGenerations({ limit = 40, offset = 0 } = {}) {
   return rows.map(mapGeneration);
 }
 
+export function updateGeneration(id, patch = {}) {
+  const current = getGeneration(id);
+  if (!current) return null;
+  const assignments = [];
+  const values = [];
+  if (Object.hasOwn(patch, "favorite")) {
+    assignments.push("favorite = ?");
+    values.push(patch.favorite ? 1 : 0);
+  }
+  if (Object.hasOwn(patch, "purpose")) {
+    assignments.push("purpose = ?");
+    values.push(String(patch.purpose || "").trim());
+  }
+  if (!assignments.length) return current;
+  values.push(id);
+  db.prepare(`UPDATE generations SET ${assignments.join(", ")} WHERE id = ?`).run(...values);
+  return getGeneration(id);
+}
+
 export function getGeneration(id) {
   const row = db.prepare("SELECT * FROM generations WHERE id = ?").get(id);
   return row ? mapGeneration(row) : null;
@@ -384,6 +408,15 @@ export function deleteGeneration(id, { deleteFiles = true } = {}) {
   }
 
   return generation;
+}
+
+export function deleteGenerations(ids = [], { deleteFiles = true } = {}) {
+  const deleted = [];
+  for (const id of ids.map((value) => String(value || "").trim()).filter(Boolean)) {
+    const generation = deleteGeneration(id, { deleteFiles });
+    if (generation) deleted.push(generation);
+  }
+  return deleted;
 }
 
 export function upsertResources(resources = []) {
@@ -636,8 +669,16 @@ function mapGeneration(row) {
     width: Number(row.width),
     height: Number(row.height),
     rationale: row.rationale || "",
+    favorite: Boolean(row.favorite),
+    purpose: row.purpose || "",
     createdAt: row.created_at,
   };
+}
+
+function ensureColumn(table, column, definition) {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (rows.some((row) => row.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 function deactivateProviderProfiles() {
@@ -728,6 +769,15 @@ function sanitizeTaskResult(result) {
     backend: result.backend,
     baseUrl: result.baseUrl,
     outputImages: result.outputImages || [],
+    intermediateImages: result.intermediateImages || [],
+    pipelineStages: result.pipelineStages || [],
+    warnings: Array.isArray(result.warnings) ? result.warnings : [],
+    project: result.project || null,
+    trainedModel: result.trainedModel || null,
+    installed: result.installed || null,
+    preset: result.preset || null,
+    logs: Array.isArray(result.logs) ? result.logs : [],
+    command: result.command || "",
     progressPreview: result.progressPreview || "",
     progressState: result.progressState || {},
     etaRelative: result.etaRelative ?? null,

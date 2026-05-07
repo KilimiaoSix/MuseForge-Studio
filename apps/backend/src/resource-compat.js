@@ -24,6 +24,8 @@ export function profileFromResource(type, item = {}) {
     title: item.title || item.alias || item.name || "",
     path: item.path || item.filename || "",
     source: item.source || "",
+    model: item.model || item.extensionName || "",
+    extensionName: item.extensionName || item.model || "",
     baseType,
     preferredVae: type === ResourceTypes.CHECKPOINT ? defaultVaeForBaseType(baseType) : "",
     recommendedSize: type === ResourceTypes.CHECKPOINT ? recommendedSizeForBaseType(baseType) : {},
@@ -32,8 +34,8 @@ export function profileFromResource(type, item = {}) {
     compatibleCheckpoints: [],
     blockedCheckpoints: [],
     controlType: type === ResourceTypes.CONTROLNET ? inferControlType(item) : "",
-    defaultPreprocessor: "",
-    defaultModule: "",
+    defaultPreprocessor: type === ResourceTypes.CONTROLNET ? inferDefaultPreprocessor(item) : "",
+    defaultModule: type === ResourceTypes.CONTROLNET ? inferDefaultPreprocessor(item) : "",
     defaultControlWeight: type === ResourceTypes.CONTROLNET ? 1 : 0,
     notes: "",
   };
@@ -126,6 +128,14 @@ export function validateGenerationPlanResources(plan = {}, profiles = []) {
         resourceName: profile.name,
       });
     }
+    if (!String(control?.image || control?.input_image || control?.reference_image || "").trim()) {
+      issues.push({
+        code: "CONTROLNET_IMAGE_REQUIRED",
+        message: `ControlNet ${name} requires a reference image.`,
+        resourceType: ResourceTypes.CONTROLNET,
+        resourceName: name,
+      });
+    }
   }
 
   const preferredVae = resolvePreferredVae(checkpoint, normalizedProfiles);
@@ -152,9 +162,27 @@ export function resolvePlanRuntimeResources(plan = {}, profiles = []) {
   return {
     checkpoint: compatibility.checkpoint?.name || plan.checkpoint || "",
     vae: compatibility.resolvedVae || "Automatic",
+    controlnet: resolveRuntimeControlNet(plan.controlnet, profiles),
     size: resolveRecommendedPlanSize(plan, compatibility.checkpoint),
     compatibility,
   };
+}
+
+function resolveRuntimeControlNet(controlnet = [], profiles = []) {
+  return asArray(controlnet).map((control) => {
+    if (typeof control === "string") return control;
+    const name = control?.name || control?.model || control?.filename || "";
+    const profile = findProfile(profiles, ResourceTypes.CONTROLNET, name);
+    if (!profile) return control;
+    return {
+      ...control,
+      name: profile.name,
+      model: profile.extensionName || profile.model || control.model || profile.name,
+      extensionName: profile.extensionName || profile.model || "",
+      module: control.module || control.preprocessor || profile.defaultPreprocessor || profile.defaultModule || "none",
+      weight: (control.weight ?? control.control_weight ?? profile.defaultControlWeight) || 1,
+    };
+  });
 }
 
 export function compatibleLorasForCheckpoint(checkpointName, profiles = []) {
@@ -266,8 +294,10 @@ function findProfile(profiles = [], type, value) {
   return scoped.find((profile) => normalizeName(profile.name) === candidate)
     || scoped.find((profile) => normalizeName(profile.title) === candidate)
     || scoped.find((profile) => normalizeName(profile.path) === candidate)
+    || scoped.find((profile) => normalizeName(profile.model) === candidate)
+    || scoped.find((profile) => normalizeName(profile.extensionName) === candidate)
     || scoped.find((profile) => {
-      const values = [profile.name, profile.title, profile.path].map(normalizeName).filter(Boolean);
+      const values = [profile.name, profile.title, profile.path, profile.model, profile.extensionName].map(normalizeName).filter(Boolean);
       return values.some((item) => item.includes(candidate) || candidate.includes(item));
     })
     || null;
@@ -324,6 +354,16 @@ function inferControlType(item = {}) {
   if (text.includes("tile")) return "tile";
   if (text.includes("lineart")) return "lineart";
   return "";
+}
+
+function inferDefaultPreprocessor(item = {}) {
+  const type = inferControlType(item);
+  if (type === "openpose") return "openpose_full";
+  if (type === "lineart") return "lineart_realistic";
+  if (type === "depth") return "depth_midas";
+  if (type === "canny") return "canny";
+  if (type === "tile") return "tile_resample";
+  return "none";
 }
 
 function resourceName(resource) {

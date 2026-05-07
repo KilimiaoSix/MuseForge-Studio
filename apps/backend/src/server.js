@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
-import { createReadStream, existsSync, readdirSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { copyFile, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createProvider } from "@sd-agent-studio/model-providers";
@@ -9,6 +10,7 @@ import { normalizeGenerationPlan } from "@sd-agent-studio/shared";
 import { loadEnvFile } from "./env.js";
 import {
   deleteGeneration,
+  deleteGenerations,
   deleteProviderProfile,
   getAppSettings,
   getActiveProviderProfile,
@@ -24,22 +26,42 @@ import {
   updateProviderProfile,
   updateProviderTestStatus,
   updateAppSettings,
+  updateGeneration,
   updateResourceProfile,
   updateResourcePurpose,
   upsertResourceProfiles,
   upsertResources,
 } from "./db.js";
-import { getBackendName, getEngineModels, getEngineStatus } from "./engines.js";
-import { deleteLocalLlmModel, getLocalLlmPullTask, getLocalLlmStatus, listLocalLlmPullTasks, localGemmaProvider, pullGemmaModel, pullLocalLlmModel, searchOllamaLibrary, getOllamaModelInfo } from "./local-llm.js";
+import { getBackendName, getEngineModels, getEngineStatus, loadEngineManifest } from "./engines.js";
+import {
+  importControlNetResource,
+  listControlNetPresets,
+  profilesFromControlNetPresets,
+} from "./controlnet-resources.js";
+import {
+  addLoraProjectAssets,
+  createLoraProject,
+  createLoraTrainingPlan,
+  getLoraProject,
+  inspectLoraProject,
+  installLoraProject,
+  listLoraProjects,
+  updateLoraCaptions,
+} from "./lora-training.js";
+import { getKohyaInstallTask, getKohyaStatus, installKohyaRuntime } from "./kohya-installer.js";
+import { deleteLocalLlmModel, getLocalLlmInstallTask, getLocalLlmPullTask, getLocalLlmStatus, installLocalLlmRuntime, listLocalLlmPullTasks, localGemmaProvider, pullGemmaModel, pullLocalLlmModel, searchOllamaLibrary, getOllamaModelInfo } from "./local-llm.js";
 import {
   compactModelContextForPlanning,
+  compatibleLorasForCheckpoint,
   profilesFromResources,
   resolvePlanRuntimeResources,
   validateGenerationPlanResources,
 } from "./resource-compat.js";
 import {
   cancelGenerationTask,
+  createControlNetInstallTask,
   createGenerationTask,
+  createLoraTrainingTask,
   getGenerationTask,
   listGenerationTasks,
   restoreInterruptedTasks,
@@ -53,7 +75,14 @@ const port = Number(process.env.SD_AGENT_PORT || 8787);
 const webuiBaseUrl = trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || "http://127.0.0.1:7860");
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const generationOutputDir = join(projectRoot, "outputs", "generations");
+const controlNetReferenceDir = join(projectRoot, "outputs", "controlnet");
 const promptTagCache = new Map();
+const ResourceInstallTypes = Object.freeze({
+  checkpoint: { dirKey: "checkpoints", extensions: [".safetensors", ".ckpt"] },
+  lora: { dirKey: "loras", extensions: [".safetensors", ".pt"] },
+  vae: { dirKey: "vae", extensions: [".safetensors", ".ckpt", ".pt"] },
+  controlnet: { dirKey: "controlnet", extensions: [".safetensors", ".pth", ".pt"] },
+});
 if (process.argv.includes("--check")) {
   console.log("backend scaffold ok");
   process.exit(0);
@@ -65,7 +94,7 @@ const server = createServer(async (req, res) => {
   try {
     await route(req, res);
   } catch (error) {
-    sendJson(res, error.code === "RESOURCE_COMPATIBILITY_ERROR" ? 400 : 500, {
+    sendJson(res, ["RESOURCE_COMPATIBILITY_ERROR", "BAD_REQUEST"].includes(error.code) ? 400 : 500, {
       error: {
         code: error.code || "INTERNAL_ERROR",
         message: error.message,
@@ -90,7 +119,12 @@ async function route(req, res) {
   }
 
   if ((req.method === "GET" || req.method === "HEAD") && url.pathname.startsWith("/outputs/generations/")) {
-    await sendGenerationFile(req, res, url.pathname);
+    await sendOutputImageFile(req, res, url.pathname, generationOutputDir);
+    return;
+  }
+
+  if ((req.method === "GET" || req.method === "HEAD") && url.pathname.startsWith("/outputs/controlnet/")) {
+    await sendOutputImageFile(req, res, url.pathname, controlNetReferenceDir);
     return;
   }
 
@@ -119,36 +153,23 @@ async function route(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/generate/plan") {
     const body = await readJson(req);
-    const provider = createConfiguredProvider(body.provider);
-    const modelContext = await withPromptTagToolContext(body.modelContext || await buildModelContext(), body.userRequest || "");
-    const plan = await provider.createGenerationPlan({
+    sendJson(res, 200, await runTagGenerationPlanner({
       userRequest: body.userRequest || "",
-      modelContext,
-    });
-    const normalizedPlan = normalizePlanForResponse(applyPromptTagToolToPlan(plan, modelContext.promptTagTool));
-    sendJson(res, 200, { plan: normalizedPlan, compatibility: validatePlan(normalizedPlan), promptTagTool: compactPromptTagToolForResponse(modelContext.promptTagTool) });
+      providerOverride: body.provider,
+      modelContextOverride: body.modelContext,
+    }));
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/generate/revise") {
     const body = await readJson(req);
     const currentPlan = normalizeGenerationPlan(body.plan || {});
-    const userRequest = [
-      "请基于 currentPlan 和 conversation 修改生图方案，只输出完整 JSON。",
-      JSON.stringify({
-        currentPlan,
-        conversation: body.conversation || [],
-        userRequest: body.userRequest || "",
-      }),
-    ].join("\n");
-    const provider = createConfiguredProvider(body.provider);
-    const modelContext = await withPromptTagToolContext(body.modelContext || await buildModelContext(), userRequest);
-    const plan = await provider.createGenerationPlan({
-      userRequest,
-      modelContext,
-    });
-    const normalizedPlan = normalizePlanForResponse(applyPromptTagToolToPlan({ ...currentPlan, ...plan }, modelContext.promptTagTool));
-    sendJson(res, 200, { plan: normalizedPlan, compatibility: validatePlan(normalizedPlan), promptTagTool: compactPromptTagToolForResponse(modelContext.promptTagTool) });
+    sendJson(res, 200, await runTagGenerationPlanner({
+      userRequest: buildReviseUserRequest({ currentPlan, conversation: body.conversation || [], userRequest: body.userRequest || "" }),
+      currentPlan,
+      providerOverride: body.provider,
+      modelContextOverride: body.modelContext,
+    }));
     return;
   }
 
@@ -235,6 +256,67 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/resources/install") {
+    const body = await readJson(req);
+    const installed = await installLocalResources(body);
+    sendJson(res, 201, { installed, resources: await buildResources({ refreshIndex: true }) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/controlnet/reference-images") {
+    const body = await readJson(req);
+    const reference = await saveControlNetReferenceImage(body);
+    sendJson(res, 201, { reference });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/controlnet/presets") {
+    sendJson(res, 200, await listControlNetPresets());
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/controlnet/extension/install") {
+    const task = createControlNetInstallTask({ presetId: "extension" });
+    sendJson(res, 202, { task, taskId: task.id });
+    return;
+  }
+
+  const controlPresetInstallMatch = url.pathname.match(/^\/api\/controlnet\/presets\/([^/]+)\/install$/);
+  if (req.method === "POST" && controlPresetInstallMatch) {
+    const task = createControlNetInstallTask({ presetId: decodeURIComponent(controlPresetInstallMatch[1]) });
+    sendJson(res, 202, { task, taskId: task.id });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/controlnet/import") {
+    const body = await readJson(req);
+    const result = await importControlNetResource(body);
+    sendJson(res, 201, { ...result, resources: await buildResources({ refreshIndex: true }) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/controlnet/resources") {
+    const resources = await buildResources({ refreshIndex: url.searchParams.get("scan") === "1" });
+    sendJson(res, 200, {
+      resources: resources.a1111.controlnet,
+      extension: resources.a1111.controlnetExtension || { installed: false, models: [], modules: [] },
+      profiles: resources.profiles.filter((profile) => profile.type === "controlnet"),
+      presets: (await listControlNetPresets()).presets,
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/controlnet/resources/scan") {
+    const resources = await buildResources({ refreshIndex: true });
+    sendJson(res, 200, {
+      resources: resources.a1111.controlnet,
+      extension: resources.a1111.controlnetExtension || { installed: false, models: [], modules: [] },
+      profiles: resources.profiles.filter((profile) => profile.type === "controlnet"),
+      presets: (await listControlNetPresets()).presets,
+    });
+    return;
+  }
+
   if (req.method === "PUT" && url.pathname === "/api/resources/profile") {
     const body = await readJson(req);
     const profile = updateResourceProfile(body.type || "", body.name || "", normalizeResourceProfilePatch(body));
@@ -270,9 +352,41 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === "DELETE" && url.pathname === "/api/generations") {
+    const body = await readJson(req);
+    const deleted = deleteGenerations(Array.isArray(body.ids) ? body.ids : [], {
+      deleteFiles: body.deleteFiles !== false,
+    });
+    sendJson(res, 200, { deleted });
+    return;
+  }
+
   const generationMatch = url.pathname.match(/^\/api\/generations\/([^/]+)$/);
+  const generationOpenMatch = url.pathname.match(/^\/api\/generations\/([^/]+)\/open$/);
+  if (req.method === "POST" && generationOpenMatch) {
+    const generation = getGeneration(generationOpenMatch[1]);
+    if (!generation) {
+      sendJson(res, 404, { error: { message: "Generation not found" } });
+      return;
+    }
+    const opened = await openGenerationInFileManager(generation);
+    sendJson(res, 200, opened);
+    return;
+  }
+
   if (req.method === "GET" && generationMatch) {
     const generation = getGeneration(generationMatch[1]);
+    if (!generation) {
+      sendJson(res, 404, { error: { message: "Generation not found" } });
+      return;
+    }
+    sendJson(res, 200, { generation });
+    return;
+  }
+
+  if (req.method === "PUT" && generationMatch) {
+    const body = await readJson(req);
+    const generation = updateGeneration(generationMatch[1], body || {});
     if (!generation) {
       sendJson(res, 404, { error: { message: "Generation not found" } });
       return;
@@ -387,6 +501,16 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/local-llm/install") {
+    sendJson(res, 200, { task: getLocalLlmInstallTask() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/local-llm/install") {
+    sendJson(res, 202, await installLocalLlmRuntime());
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/local-llm/library") {
     sendJson(res, 200, await searchOllamaLibrary(url.searchParams.get("q") || ""));
     return;
@@ -430,6 +554,21 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/kohya/status") {
+    sendJson(res, 200, await getKohyaStatus());
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/kohya/install") {
+    sendJson(res, 200, { task: getKohyaInstallTask() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/kohya/install") {
+    sendJson(res, 202, await installKohyaRuntime());
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/lora/plan") {
     const body = await readJson(req);
     sendJson(res, 200, {
@@ -437,6 +576,54 @@ async function route(req, res) {
       note: "This is a scaffold response. Connect kohya_ss or sd-scripts in the next implementation pass.",
     });
     return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/lora/projects") {
+    sendJson(res, 200, { projects: await listLoraProjects() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/lora/projects") {
+    const body = await readJson(req);
+    sendJson(res, 201, { project: await createLoraProject(body) });
+    return;
+  }
+
+  const loraProjectMatch = url.pathname.match(/^\/api\/lora\/projects\/([^/]+)$/);
+  if (req.method === "GET" && loraProjectMatch) {
+    sendJson(res, 200, { project: await getLoraProject(loraProjectMatch[1]) });
+    return;
+  }
+
+  const loraProjectActionMatch = url.pathname.match(/^\/api\/lora\/projects\/([^/]+)\/(assets|inspect|captions|plan|train|install)$/);
+  if (loraProjectActionMatch) {
+    const [, projectId, action] = loraProjectActionMatch;
+    const body = req.method === "GET" ? {} : await readJson(req);
+    if (req.method === "POST" && action === "assets") {
+      sendJson(res, 201, await addLoraProjectAssets(projectId, body));
+      return;
+    }
+    if (req.method === "POST" && action === "inspect") {
+      sendJson(res, 200, await inspectLoraProject(projectId));
+      return;
+    }
+    if (req.method === "PUT" && action === "captions") {
+      sendJson(res, 200, await updateLoraCaptions(projectId, body));
+      return;
+    }
+    if (req.method === "POST" && action === "plan") {
+      sendJson(res, 200, await createLoraTrainingPlan(projectId, body));
+      return;
+    }
+    if (req.method === "POST" && action === "train") {
+      const task = createLoraTrainingTask({ projectId });
+      sendJson(res, 202, { task, taskId: task.id });
+      return;
+    }
+    if (req.method === "POST" && action === "install") {
+      sendJson(res, 200, await installLoraProject(projectId));
+      return;
+    }
   }
 
   sendJson(res, 404, { error: { message: "Not found" } });
@@ -456,6 +643,7 @@ async function buildModelContext() {
     vaes: a1111Models.vaes?.length ? a1111Models.vaes : await scan("models/VAE", [".safetensors", ".ckpt", ".pt"]),
     controlnet: a1111Models.controlnet?.length ? a1111Models.controlnet : await scan("models/ControlNet", [".safetensors", ".pth", ".pt"]),
     samplers: a1111Models.samplers || [],
+    upscalers: a1111Models.upscalers || [],
     promptTools: engineModels?.engines?.a1111?.promptTools || detectPromptTools(root),
   };
   ensureResourceProfilesFromModelContext(context);
@@ -475,8 +663,10 @@ async function buildResources({ refreshIndex = false } = {}) {
       loras: models.loras || [],
       vaes: models.vaes || [],
       samplers: models.samplers || [],
+      upscalers: models.upscalers || [],
       controlnet: models.controlnet || [],
       options: models.options || {},
+      modelDirs: a1111.modelDirs || {},
       promptTools: a1111.promptTools || detectPromptTools(a1111.path),
     },
     index: listResourceIndex(),
@@ -491,10 +681,12 @@ async function buildResources({ refreshIndex = false } = {}) {
       ...resources.a1111.controlnet.map((item) => toResource("controlnet", item)),
     ]);
     upsertResourceProfiles(profilesFromResources(resources));
+    upsertResourceProfiles(profilesFromControlNetPresets(resources.a1111.controlnet));
     resources.index = listResourceIndex();
   }
 
   ensureResourceProfilesFromResources(resources);
+  upsertResourceProfiles(profilesFromControlNetPresets(resources.a1111.controlnet));
   resources.profiles = listResourceProfiles();
   resources.compatibility = buildResourceCompatibilitySummary(resources.profiles);
 
@@ -509,6 +701,150 @@ function toResource(type, item = {}) {
     source: item.source || "",
     path: item.path || item.filename || "",
   };
+}
+
+async function installLocalResources(input = {}) {
+  const files = normalizeInstallFiles(input);
+  if (!files.length) throw badRequest("请选择要安装的模型文件。");
+
+  const installed = [];
+  for (const file of files) {
+    const uploadContent = decodeUploadContent(file);
+    const sourcePath = uploadContent ? "" : resolve(String(file.path || ""));
+    const sourceStat = uploadContent ? { size: uploadContent.length } : await stat(sourcePath).catch(() => null);
+    if (!sourceStat?.isFile && !uploadContent) throw badRequest(`文件不存在或不可读取：${file.path || ""}`);
+
+    const sourceName = file.name || file.filename || basename(sourcePath);
+    const sourceExtension = extname(sourceName || sourcePath).toLowerCase();
+    const resourceType = inferInstallResourceType(file, sourceName || sourcePath, input.type);
+    const allowedExtensions = ResourceInstallTypes[resourceType].extensions;
+    if (!allowedExtensions.includes(sourceExtension)) {
+      throw badRequest(`${resourceType} 不支持 ${sourceExtension || "无扩展名"} 文件。`);
+    }
+
+    const targetDir = await resolveResourceInstallDir(resourceType);
+    mkdirSync(targetDir, { recursive: true });
+
+    const filename = sanitizeResourceFilename(sourceName);
+    if (extname(filename).toLowerCase() !== sourceExtension) {
+      throw badRequest(`文件名扩展名与源文件不一致：${filename}`);
+    }
+
+    const destinationPath = await uniqueDestinationPath(targetDir, filename, Boolean(input.overwrite));
+    if (sourcePath && sourcePath === destinationPath) {
+      installed.push({
+        type: resourceType,
+        name: basename(destinationPath),
+        path: destinationPath,
+        size: sourceStat.size,
+        skipped: true,
+        message: "文件已在目标目录",
+      });
+      continue;
+    }
+
+    if (uploadContent) {
+      await writeFile(destinationPath, uploadContent);
+    } else {
+      await copyFile(sourcePath, destinationPath);
+    }
+    installed.push({
+      type: resourceType,
+      name: basename(destinationPath),
+      path: destinationPath,
+      size: sourceStat.size,
+      skipped: false,
+    });
+  }
+
+  return installed;
+}
+
+function decodeUploadContent(file = {}) {
+  const raw = file.contentBase64 || file.dataBase64 || "";
+  const dataUrl = file.dataUrl || "";
+  const source = raw || dataUrl;
+  if (!source) return null;
+  const base64 = String(source).replace(/^data:[^;]+;base64,/, "");
+  if (!base64) return null;
+  return Buffer.from(base64, "base64");
+}
+
+function inferInstallResourceType(file = {}, sourcePath = "", fallbackType = "") {
+  if (file.type || fallbackType) return normalizeInstallResourceType(file.type || fallbackType);
+
+  const extension = extname(sourcePath).toLowerCase();
+  const text = `${sourcePath} ${file.name || ""}`.toLowerCase().replace(/\\/g, "/");
+  if (/(^|\/)(stable-diffusion|checkpoints?|sd-models?)(\/|$)/.test(text)) return "checkpoint";
+  if (/(^|\/)(lora|loras|lycoris|locon)(\/|$)/.test(text)) return "lora";
+  if (/(^|\/)(vae|vae-approx)(\/|$)/.test(text)) return "vae";
+  if (/(^|\/)(controlnet|control-net|control_net)(\/|$)/.test(text)) return "controlnet";
+  if (/(^|[._ -])(vae|kl-f8|vae-ft)([._ -]|$)/.test(text)) return "vae";
+  if (/(^|[._ -])(controlnet|control-net|control_net|canny|depth|openpose|lineart|scribble|tile|ip-adapter)([._ -]|$)/.test(text)) return "controlnet";
+  if (/(^|[._ -])(lora|lycoris|locon)([._ -]|$)/.test(text)) return "lora";
+
+  if (extension === ".pth") return "controlnet";
+  throw badRequest(`无法识别资源类型：${basename(sourcePath)}，请先选择 Checkpoint、LoRA、VAE 或 ControlNet。`);
+}
+
+function normalizeInstallResourceType(value) {
+  const type = String(value || "checkpoint").toLowerCase();
+  if (!ResourceInstallTypes[type]) throw badRequest(`不支持的资源类型：${value || ""}`);
+  return type;
+}
+
+function normalizeInstallFiles(input = {}) {
+  if (Array.isArray(input.files)) return input.files;
+  if (input.path) return [{ path: input.path, name: input.name }];
+  return [];
+}
+
+async function resolveResourceInstallDir(resourceType) {
+  const manifest = await loadEngineManifest();
+  const engine = manifest.engines?.a1111;
+  const installRoot = resolve(projectRoot, manifest.installDir || "vendor/engines");
+  const enginePath = process.env.SD_WEBUI_ROOT
+    ? resolve(process.env.SD_WEBUI_ROOT)
+    : join(installRoot, engine?.directory || "stable-diffusion-webui");
+  const relativeDir = engine?.modelDirs?.[ResourceInstallTypes[resourceType].dirKey];
+  if (!relativeDir) throw badRequest(`未配置 ${resourceType} 的安装目录。`);
+  return join(enginePath, relativeDir);
+}
+
+async function uniqueDestinationPath(targetDir, filename, overwrite = false) {
+  const destinationPath = join(targetDir, filename);
+  if (!isPathInside(destinationPath, targetDir)) throw badRequest("文件名不安全。");
+  if (overwrite || !existsSync(destinationPath)) return destinationPath;
+
+  const extension = extname(filename);
+  const stem = basename(filename, extension);
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = join(targetDir, `${stem}-${index}${extension}`);
+    if (!existsSync(candidate)) return candidate;
+  }
+  throw badRequest(`无法生成不重名文件：${filename}`);
+}
+
+function isPathInside(file, root) {
+  const normalizedFile = resolve(file);
+  const normalizedRoot = resolve(root);
+  return normalizedFile === normalizedRoot || normalizedFile.startsWith(`${normalizedRoot}${pathSeparator()}`);
+}
+
+function pathSeparator() {
+  return process.platform === "win32" ? "\\" : "/";
+}
+
+function sanitizeResourceFilename(value = "") {
+  const filename = basename(String(value || "").trim());
+  if (!filename || filename === "." || filename === "..") throw badRequest("文件名不安全。");
+  return filename.replace(/[<>:"|?*\x00-\x1F]/g, "_");
+}
+
+function badRequest(message) {
+  const error = new Error(message);
+  error.code = "BAD_REQUEST";
+  return error;
 }
 
 function getProviderStatus() {
@@ -534,19 +870,313 @@ function getProviderStatus() {
   };
 }
 
+async function runTagGenerationPlanner({
+  userRequest = "",
+  currentPlan = null,
+  providerOverride,
+  modelContextOverride,
+} = {}) {
+  const provider = createConfiguredProvider(providerOverride);
+  const modelContext = await withPromptTagToolContext(modelContextOverride || await buildModelContext(), buildPromptTagSearchText(userRequest, [], currentPlan));
+  const plan = await provider.createGenerationPlan({
+    userRequest,
+    modelContext,
+  });
+  const hintedPlan = applyRequestedResourceHints({ ...currentPlan, ...plan }, {
+    userRequest,
+    conversation: [],
+    modelContext,
+  });
+  const preset = chooseQualityPreset({
+    intent: userRequest,
+    currentPlan,
+    plan: hintedPlan,
+    modelContext,
+  });
+  const normalizedPlan = normalizePlanForResponse(applyPromptTagToolToPlan(applyTagPlannerDefaults(hintedPlan, preset, modelContext), modelContext.promptTagTool));
+  return {
+    plan: normalizedPlan,
+    compatibility: validatePlan(normalizedPlan),
+    promptTagTool: compactPromptTagToolForResponse(modelContext.promptTagTool),
+  };
+}
+
+function buildReviseUserRequest({ currentPlan, conversation = [], userRequest = "" }) {
+  return [
+    "请基于 currentPlan 和 conversation 修改生图方案，只输出完整 JSON。",
+    JSON.stringify({
+      currentPlan,
+      conversation,
+      userRequest,
+    }),
+  ].join("\n");
+}
+
+function buildPromptTagSearchText(userRequest = "", conversation = [], currentPlan = null) {
+  return [
+    Array.isArray(conversation) ? conversation.slice(-6).map((item) => `${item.role || "user"}: ${item.text || item.content || ""}`).join("\n") : "",
+    currentPlan?.positive_prompt || "",
+    userRequest,
+  ].filter(Boolean).join("\n");
+}
+
+
+function normalizeResourceLookupName(value = "") {
+  return String(value || "").toLowerCase().replace(/\.(safetensors|ckpt|pt|pth)$/i, "").replace(/[_\s/\\[\]()-]+/g, "");
+}
+
+function chooseQualityPreset({
+  intent = "",
+  conversation = [],
+  currentPlan = null,
+  plan = null,
+  modelContext = {},
+  aspect,
+  baseType,
+  loraCount,
+} = {}) {
+  const text = [
+    Array.isArray(conversation) ? conversation.map((item) => item.text || item.content || "").join("\n") : "",
+    currentPlan?.positive_prompt || "",
+    plan?.positive_prompt || "",
+    intent,
+  ].join("\n").toLowerCase();
+  const explicitQuick = /快速|草图|预览|低耗时|省显存|quick|draft|preview/.test(text);
+  const wantsPortrait = aspect === "portrait" || /手机壁纸|竖屏|竖幅|portrait|头像|半身|近景|海报|全身/.test(text);
+  const wantsWallpaper = /手机壁纸|壁纸|1080|1920|4k|高清|大图/.test(text);
+  const wantsFinal = /高清|精致|精修|成片|发布|高质量|细节|壁纸|头像|final|best quality|masterpiece/.test(text);
+  const hasLora = Number(loraCount || 0) > 0 || (Array.isArray(plan?.lora) && plan.lora.length > 0) || /lora|shiratama|画风/.test(text);
+  const resolvedAspect = aspect || (wantsPortrait ? "portrait" : /横屏|横幅|landscape|banner/.test(text) ? "landscape" : "square");
+  const resolvedBaseType = baseType || inferBaseTypeFromPlanOrContext(plan || currentPlan, modelContext);
+  const highQuality = !explicitQuick && (wantsFinal || wantsWallpaper || hasLora);
+  const sd15Portrait = resolvedBaseType !== "sdxl" && resolvedBaseType !== "pony" && resolvedAspect === "portrait";
+
+  return {
+    id: explicitQuick ? "quick_preview" : highQuality ? "auto_high_quality" : "balanced",
+    highQuality,
+    explicitQuick,
+    aspect: resolvedAspect,
+    baseType: resolvedBaseType,
+    size: sd15Portrait
+      ? { width: 512, height: 768 }
+      : resolvedBaseType === "sdxl" || resolvedBaseType === "pony"
+        ? resolvedAspect === "portrait" ? { width: 832, height: 1216 } : resolvedAspect === "landscape" ? { width: 1216, height: 832 } : { width: 1024, height: 1024 }
+        : resolvedAspect === "landscape" ? { width: 768, height: 512 } : { width: 512, height: 512 },
+    target: null,
+    refineTarget: null,
+    steps: highQuality ? 28 : explicitQuick ? 10 : 18,
+    cfg_scale: highQuality ? 6 : 5,
+    samplerPriority: ["DPM++ 2M Karras", "DPM++ 2M", "DPM++ SDE Karras", "Euler a"],
+    refine: false,
+    upscale: false,
+    adetailer: highQuality && (/头像|半身|近景|人物|少女|1girl|1boy|portrait|face|壁纸/.test(text) || hasLora),
+    loraStyleWeight: highQuality ? 0.68 : 0.65,
+  };
+}
+
+function inferBaseTypeFromPlanOrContext(plan = {}, modelContext = {}) {
+  const checkpointName = plan?.checkpoint || "";
+  const checkpoints = Array.isArray(modelContext.checkpoints) ? modelContext.checkpoints : [];
+  const match = checkpoints.find((checkpoint) => normalizeResourceLookupName(checkpoint.title || checkpoint.name) === normalizeResourceLookupName(checkpointName)
+    || normalizeResourceLookupName(checkpoint.title || checkpoint.name).includes(normalizeResourceLookupName(checkpointName))
+    || normalizeResourceLookupName(checkpointName).includes(normalizeResourceLookupName(checkpoint.title || checkpoint.name)));
+  return match?.profile?.baseType || "sd15";
+}
+
+function hasTriggerlessStyleLora(plan = {}) {
+  return Array.isArray(plan.lora) && plan.lora.some((lora) => {
+    if (!lora || typeof lora !== "object") return false;
+    const triggers = Array.isArray(lora.trigger_words) ? lora.trigger_words.filter(Boolean) : [];
+    const name = normalizeResourceLookupName(lora.name || lora.alias || "");
+    return triggers.length === 0 && (name.includes("shiratama") || Number(lora.weight || 0) >= 0.5);
+  });
+}
+
+function applyTagPlannerDefaults(plan = {}, preset = {}, modelContext = {}) {
+  const next = forceSinglePassPlan(normalizeGenerationPlan(plan || {}));
+  if (preset.size) {
+    next.width = preset.size.width;
+    next.height = preset.size.height;
+  }
+  if (preset.highQuality || preset.explicitQuick) {
+    next.steps = preset.steps;
+    next.cfg_scale = preset.cfg_scale;
+  }
+  next.sampler = chooseSampler(next.sampler, preset.samplerPriority, modelContext);
+  next.lora = normalizePlannerLoras(next.lora, preset, { triggerlessStyleLora: hasTriggerlessStyleLora(next) });
+  next.positive_prompt = simplifyPositivePrompt(next.positive_prompt, next.lora);
+  next.negative_prompt = simplifyNegativePrompt(next.negative_prompt);
+  next.rationale = [
+    next.rationale || "",
+    "已根据 prompt-all-in-one 标签库生成简洁 tags，并强制单次 txt2img：不使用 Hires、Extras、ADetailer 或视觉评级。",
+  ].filter(Boolean).join("\n");
+  return forceSinglePassPlan(next);
+}
+
+function simplifyPositivePrompt(value = "", loras = []) {
+  const tags = splitPromptTags(value);
+  const blockedTags = blockedPromptTagsForLoras(loras);
+  const preferred = [
+    "masterpiece",
+    "best quality",
+    "1girl",
+    "solo",
+    "simple background",
+    "white background",
+    "looking at viewer",
+    "smile",
+    "upper body",
+    "portrait",
+    "long hair",
+    "white hair",
+    "blue eyes",
+    "clean lineart",
+  ];
+  const seen = new Set();
+  const result = [];
+  for (const tag of [...tags, ...preferred]) {
+    const normalized = tag.toLowerCase();
+    if (!tag || seen.has(normalized) || blockedTags.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(tag);
+    if (result.length >= 18) break;
+  }
+  return result.join(", ");
+}
+
+function blockedPromptTagsForLoras(loras = []) {
+  const blocked = new Set();
+  for (const lora of Array.isArray(loras) ? loras : []) {
+    if (!lora || typeof lora !== "object") continue;
+    const triggerWords = Array.isArray(lora.trigger_words) ? lora.trigger_words.filter(Boolean) : [];
+    if (triggerWords.length) continue;
+    for (const value of [lora.name, lora.alias, lora.filename, lora.model]) {
+      const text = String(value || "").trim();
+      if (!text) continue;
+      const base = text.replace(/\.(safetensors|ckpt|pt|pth)$/i, "");
+      for (const candidate of [text, base, base.replace(/[_-]+/g, " ")]) {
+        if (candidate.trim()) blocked.add(candidate.trim().toLowerCase());
+      }
+    }
+  }
+  return blocked;
+}
+
+function simplifyNegativePrompt(value = "") {
+  const defaults = [
+    "low quality",
+    "worst quality",
+    "blurry",
+    "bad anatomy",
+    "bad hands",
+    "extra fingers",
+    "deformed face",
+    "text",
+    "watermark",
+    "logo",
+  ];
+  const seen = new Set();
+  return [...splitPromptTags(value), ...defaults]
+    .filter((tag) => {
+      const normalized = tag.toLowerCase();
+      if (!tag || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    })
+    .slice(0, 14)
+    .join(", ");
+}
+
+function chooseSampler(current = "", priority = [], modelContext = {}) {
+  const samplers = Array.isArray(modelContext.samplers) ? modelContext.samplers.map((sampler) => sampler.name || sampler).filter(Boolean) : [];
+  if (!samplers.length) return current || priority[0] || "Euler a";
+  for (const wanted of priority || []) {
+    const exact = samplers.find((name) => name.toLowerCase() === wanted.toLowerCase());
+    if (exact) return exact;
+    const loose = samplers.find((name) => name.toLowerCase().includes(wanted.toLowerCase().replace(/\s+karras\b/i, "")));
+    if (loose) return loose;
+  }
+  return current && samplers.includes(current) ? current : samplers[0];
+}
+
+function normalizePlannerLoras(loras = [], preset = {}, options = {}) {
+  if (!Array.isArray(loras)) return [];
+  return loras.map((lora) => {
+    if (!lora || typeof lora !== "object") return lora;
+    const triggerWords = Array.isArray(lora.trigger_words)
+      ? lora.trigger_words.filter((word) => isLikelyRealTriggerWord(word))
+      : [];
+    const rawWeight = Number.isFinite(Number(lora.weight)) ? Number(lora.weight) : preset.loraStyleWeight || 0.7;
+    const isTriggerless = triggerWords.length === 0;
+    const name = normalizeResourceLookupName(lora.name || lora.alias || "");
+    const maxWeight = isTriggerless
+      ? name.includes("shiratama") || options.triggerlessStyleLora ? 0.3 : 0.55
+      : 0.85;
+    const minWeight = isTriggerless && (name.includes("shiratama") || options.triggerlessStyleLora) ? 0.15 : 0.35;
+    const weight = Math.max(minWeight, Math.min(maxWeight, rawWeight));
+    return {
+      ...lora,
+      weight,
+      trigger_words: triggerWords,
+    };
+  });
+}
+
+function applyRequestedResourceHints(plan = {}, { userRequest = "", conversation = [], modelContext = {} } = {}) {
+  const next = normalizeGenerationPlan(plan || {});
+  const requestedText = [
+    Array.isArray(conversation) ? conversation.map((item) => item.text || item.content || "").join("\n") : "",
+    userRequest,
+  ].join("\n");
+  const selectedNames = new Set((Array.isArray(next.lora) ? next.lora : [])
+    .map((lora) => normalizeResourceLookupName(lora.name || lora.alias || lora.filename || ""))
+    .filter(Boolean));
+  const compatible = compatibleLorasForCheckpoint(next.checkpoint, listResourceProfiles());
+  for (const lora of compatible) {
+    if (!textMentionsResource(requestedText, lora)) continue;
+    const normalizedName = normalizeResourceLookupName(lora.name);
+    if (selectedNames.has(normalizedName)) continue;
+    next.lora.push({
+      name: lora.name,
+      alias: lora.title,
+      weight: Number(lora.defaultWeight || 0.7),
+      trigger_words: (lora.triggerWords || []).filter((word) => isLikelyRealTriggerWord(word)),
+    });
+    selectedNames.add(normalizedName);
+  }
+  return next;
+}
+
+function textMentionsResource(text = "", resource = {}) {
+  const normalizedText = normalizeResourceLookupName(text);
+  return [resource.name, resource.title, resource.path]
+    .map(normalizeResourceLookupName)
+    .filter(Boolean)
+    .some((value) => normalizedText.includes(value) || value.includes(normalizedText));
+}
+
+function isLikelyRealTriggerWord(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (/[\u4e00-\u9fff]/.test(text)) return false;
+  if (/\.(safetensors|ckpt|pt|pth)$/i.test(text)) return false;
+  return true;
+}
+
 function preparePlanForGeneration(rawPlan = {}) {
-  const plan = normalizeGenerationPlan(rawPlan);
+  const plan = forceSinglePassPlan(normalizeGenerationPlan(rawPlan));
   const runtime = resolvePlanRuntimeResources(plan, listResourceProfiles());
   const sizedPlan = applyRuntimeSize(plan, runtime.size);
-  return {
+  return forceSinglePassPlan({
     ...sizedPlan,
+    controlnet: runtime.controlnet || sizedPlan.controlnet || [],
     _runtime: {
       ...(plan._runtime || {}),
       checkpoint: runtime.checkpoint,
       vae: runtime.vae,
       compatibility: runtime.compatibility,
     },
-  };
+  });
 }
 
 function validatePlan(plan = {}) {
@@ -554,9 +1184,21 @@ function validatePlan(plan = {}) {
 }
 
 function normalizePlanForResponse(rawPlan = {}) {
-  const plan = normalizeGenerationPlan(rawPlan);
+  const plan = forceSinglePassPlan(normalizeGenerationPlan(rawPlan));
   const compatibility = validatePlan(plan);
-  return applyRuntimeSize(plan, compatibility.recommendedSize?.[aspectBucketForPlan(plan)]);
+  return forceSinglePassPlan(applyRuntimeSize(plan, compatibility.recommendedSize?.[aspectBucketForPlan(plan)]));
+}
+
+function forceSinglePassPlan(plan = {}) {
+  return {
+    ...plan,
+    target_width: null,
+    target_height: null,
+    hires_fix: false,
+    refine: false,
+    upscale: false,
+    adetailer: false,
+  };
 }
 
 function applyPromptTagToolToPlan(rawPlan = {}, promptTagTool = {}) {
@@ -687,14 +1329,6 @@ async function withPromptTagToolContext(modelContext = {}, userRequest = "") {
   return {
     ...modelContext,
     promptTagTool,
-    toolCalls: [
-      ...(Array.isArray(modelContext.toolCalls) ? modelContext.toolCalls : []),
-      promptTagTool.toolCall,
-    ].filter(Boolean),
-    toolResults: [
-      ...(Array.isArray(modelContext.toolResults) ? modelContext.toolResults : []),
-      promptTagTool.toolResult,
-    ].filter(Boolean),
   };
 }
 
@@ -865,15 +1499,6 @@ function compactPromptTagToolForResponse(promptTagTool = {}) {
     totalLibraryTags: promptTagTool.totalLibraryTags,
     candidates: (promptTagTool.candidates || []).slice(0, 20),
     groups: (promptTagTool.groups || []).slice(0, 8),
-    toolCall: promptTagTool.toolCall,
-    toolResult: promptTagTool.toolResult ? {
-      ...promptTagTool.toolResult,
-      output: {
-        ...promptTagTool.toolResult.output,
-        candidates: (promptTagTool.toolResult.output?.candidates || []).slice(0, 20),
-        groups: (promptTagTool.toolResult.output?.groups || []).slice(0, 8),
-      },
-    } : undefined,
   };
 }
 
@@ -999,6 +1624,10 @@ async function scanFiles(dir, allowedExtensions) {
     for (const entry of entries) {
       const path = join(dir, entry);
       const itemStat = await stat(path);
+      if (itemStat.isDirectory()) {
+        files.push(...await scanFiles(path, allowedExtensions));
+        continue;
+      }
       if (!itemStat.isFile()) continue;
       if (!allowedExtensions.includes(extname(entry).toLowerCase())) continue;
       files.push({ name: entry, path, size: itemStat.size });
@@ -1247,11 +1876,12 @@ function sendCors(res, status, headers = {}) {
   });
 }
 
-async function sendGenerationFile(req, res, pathname) {
+async function sendOutputImageFile(req, res, pathname, rootDir) {
   const filename = basename(decodeURIComponent(pathname));
-  const file = join(generationOutputDir, filename);
+  const file = join(rootDir, filename);
+  const extension = extname(file).toLowerCase();
 
-  if (!file.startsWith(generationOutputDir) || extname(file).toLowerCase() !== ".png") {
+  if (!file.startsWith(rootDir) || ![".png", ".jpg", ".jpeg", ".webp"].includes(extension)) {
     sendJson(res, 404, { error: { message: "Not found" } });
     return;
   }
@@ -1264,7 +1894,7 @@ async function sendGenerationFile(req, res, pathname) {
   }
 
   sendCors(res, 200, {
-    "Content-Type": "image/png",
+    "Content-Type": imageContentType(extension),
     "Cache-Control": "no-store",
   });
   if (req.method === "HEAD") {
@@ -1272,6 +1902,93 @@ async function sendGenerationFile(req, res, pathname) {
     return;
   }
   createReadStream(file).pipe(res);
+}
+
+async function saveControlNetReferenceImage(input = {}) {
+  const image = String(input.image || input.dataUrl || "").trim();
+  const parsed = parseDataImage(image);
+  if (!parsed) {
+    const error = new Error("ControlNet reference image must be a data:image URL");
+    error.code = "BAD_REQUEST";
+    throw error;
+  }
+  if (parsed.buffer.length > 20 * 1024 * 1024) {
+    const error = new Error("ControlNet reference image is too large; max 20MB");
+    error.code = "BAD_REQUEST";
+    throw error;
+  }
+  mkdirSync(controlNetReferenceDir, { recursive: true });
+  const cleanName = sanitizeUploadName(input.filename || "reference");
+  const filename = `${Date.now()}-${randomUUID().slice(0, 8)}-${cleanName}.${parsed.extension}`;
+  const file = join(controlNetReferenceDir, filename);
+  await writeFile(file, parsed.buffer);
+  return {
+    filename,
+    url: `/outputs/controlnet/${filename}`,
+    size: parsed.buffer.length,
+    mimeType: parsed.mimeType,
+  };
+}
+
+function parseDataImage(value = "") {
+  const match = String(value).match(/^data:(image\/(?:png|jpe?g|webp));base64,([a-z0-9+/=\s]+)$/i);
+  if (!match) return null;
+  const mimeType = match[1].toLowerCase().replace("image/jpg", "image/jpeg");
+  const extension = mimeType === "image/jpeg" ? "jpg" : mimeType.split("/")[1];
+  return {
+    mimeType,
+    extension,
+    buffer: Buffer.from(match[2].replace(/\s/g, ""), "base64"),
+  };
+}
+
+function sanitizeUploadName(value = "") {
+  const extensionless = basename(String(value || "reference")).replace(/\.[^.]+$/, "");
+  return (extensionless || "reference")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "reference";
+}
+
+function imageContentType(extension = "") {
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".webp") return "image/webp";
+  return "image/png";
+}
+
+async function openGenerationInFileManager(generation) {
+  const firstImage = generation.images?.find((image) => image.filename)?.filename || "";
+  const target = firstImage ? resolve(generationOutputDir, basename(firstImage)) : generationOutputDir;
+  const safeTarget = target.startsWith(generationOutputDir) ? target : generationOutputDir;
+  const exists = existsSync(safeTarget);
+  const command = fileManagerCommand(exists ? safeTarget : generationOutputDir);
+  if (!command) {
+    const error = new Error("Open in file manager is supported on macOS, Windows, and Linux desktop environments.");
+    error.code = "UNSUPPORTED_PLATFORM";
+    throw error;
+  }
+  await execFilePromise(command.command, command.args);
+  return {
+    ok: true,
+    path: safeTarget,
+    opened: exists ? "file" : "folder",
+  };
+}
+
+function fileManagerCommand(target) {
+  if (process.platform === "darwin") return { command: "open", args: ["-R", target] };
+  if (process.platform === "win32") return { command: "explorer.exe", args: ["/select,", target] };
+  if (process.platform === "linux") return { command: "xdg-open", args: [dirname(target)] };
+  return null;
+}
+
+function execFilePromise(command, args = []) {
+  return new Promise((resolveExec, rejectExec) => {
+    execFile(command, args, { windowsHide: true }, (error) => {
+      if (error) rejectExec(error);
+      else resolveExec();
+    });
+  });
 }
 
 function trimTrailingSlash(value) {

@@ -3,10 +3,12 @@ import { existsSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeGenerationPlan } from "@sd-agent-studio/shared";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const manifestPath = join(projectRoot, "engines", "manifest.json");
 const generationOutputDir = join(projectRoot, "outputs", "generations");
+const controlNetReferenceDir = join(projectRoot, "outputs", "controlnet");
 
 export const InferenceBackends = Object.freeze({
   A1111: "a1111",
@@ -22,9 +24,8 @@ export function getBackendName() {
 
 export async function getEngineStatus() {
   const manifest = await loadEngineManifest();
-  const installRoot = resolve(projectRoot, manifest.installDir);
   const engine = manifest.engines.a1111;
-  const path = join(installRoot, engine.directory);
+  const path = resolveWebuiRoot(manifest, engine);
   const baseUrl = resolveEngineBaseUrl(engine);
   const healthUrl = `${baseUrl}${engine.healthPath}`;
   const health = await testHttp(healthUrl);
@@ -65,8 +66,8 @@ export async function getEngineModels() {
   };
 }
 
-export async function runGeneration(plan) {
-  return runA1111Txt2Img(plan);
+export async function runGeneration(plan, options = {}) {
+  return runA1111Txt2Img(plan, options);
 }
 
 export async function unloadA1111Model() {
@@ -118,49 +119,93 @@ export async function interruptGeneration() {
   return { backend: InferenceBackends.A1111, cancelled: true };
 }
 
-export async function runA1111Txt2Img(plan) {
+export async function runA1111Txt2Img(plan, options = {}) {
+  const normalizedPlan = normalizeSinglePassPlan(plan || {});
   const baseUrl = trimTrailingSlash(process.env.A1111_BASE_URL || process.env.SD_WEBUI_BASE_URL || "http://127.0.0.1:7860");
-  const hiresFix = resolveA1111HiresFix(plan);
-  const enableHighRes = hiresFix.enabled;
-  const resizeTarget = resolveA1111ResizeTarget(plan);
-  const checkpoint = plan._runtime?.checkpoint || plan.checkpoint || "";
-  const vae = plan._runtime?.vae || "Automatic";
+  const checkpoint = normalizedPlan._runtime?.checkpoint || normalizedPlan.checkpoint || "";
+  const vae = normalizedPlan._runtime?.vae || "Automatic";
+  const controlNetArgs = await buildA1111ControlNetArgs(normalizedPlan);
+  const pipelineStages = [{
+    id: "base",
+    label: "单次出图",
+    status: "pending",
+    params: {
+      width: normalizedPlan.width,
+      height: normalizedPlan.height,
+      steps: normalizedPlan.steps,
+      sampler: normalizedPlan.sampler,
+    },
+  }];
+  const markStage = (id, patch) => {
+    const stage = pipelineStages.find((item) => item.id === id);
+    if (stage) Object.assign(stage, patch);
+    if (typeof options.onProgress === "function") {
+      options.onProgress({
+        pipelineStages,
+        progressLabel: patch.progressLabel || stage?.label || "",
+        progress: patch.progress,
+      });
+    }
+  };
+
+  markStage("base", { status: "running", progress: 0.08, progressLabel: "基础构图中" });
   const payload = {
-    prompt: buildA1111Prompt(plan),
-    negative_prompt: plan.negative_prompt,
-    width: plan.width,
-    height: plan.height,
-    sampler_name: plan.sampler,
-    steps: plan.steps,
-    cfg_scale: plan.cfg_scale,
-    seed: plan.seed,
-    batch_size: plan.batch_size,
-    override_settings: checkpoint ? { sd_model_checkpoint: checkpoint, sd_vae: vae } : undefined,
+    prompt: buildA1111Prompt(normalizedPlan),
+    negative_prompt: normalizedPlan.negative_prompt,
+    width: normalizedPlan.width,
+    height: normalizedPlan.height,
+    sampler_name: normalizedPlan.sampler,
+    steps: normalizedPlan.steps,
+    cfg_scale: normalizedPlan.cfg_scale,
+    seed: normalizedPlan.seed,
+    batch_size: normalizedPlan.batch_size,
+    override_settings: {
+      ...(checkpoint ? { sd_model_checkpoint: checkpoint, sd_vae: vae } : {}),
+      ...(plan._runtime?.clipSkip || plan.clip_skip ? { CLIP_stop_at_last_layers: Math.max(1, Math.round(finiteNumber(plan._runtime?.clipSkip || plan.clip_skip, 1))) } : {}),
+    },
     override_settings_restore_afterwards: false,
-    enable_hr: enableHighRes,
-    denoising_strength: enableHighRes ? hiresFix.denoising_strength : undefined,
-    hr_resize_x: enableHighRes ? hiresFix.target_width : undefined,
-    hr_resize_y: enableHighRes ? hiresFix.target_height : undefined,
-    hr_upscaler: enableHighRes ? hiresFix.upscaler : undefined,
-    hr_second_pass_steps: enableHighRes ? hiresFix.second_pass_steps : undefined,
+    enable_hr: false,
+    alwayson_scripts: controlNetArgs.length ? {
+      controlnet: {
+        args: controlNetArgs,
+      },
+    } : undefined,
   };
 
   const data = await postA1111JsonWithRecovery(baseUrl, "/sdapi/v1/txt2img", payload, "txt2img");
-  const images = !enableHighRes && resizeTarget.enabled
-    ? await resizeA1111Images(baseUrl, data.images || [], resizeTarget)
-    : data.images || [];
-  const outputImages = await saveA1111Images(images, resizeTarget.enabled || enableHighRes ? {
-    ...plan,
-    target_width: resizeTarget.target_width || hiresFix.target_width,
-    target_height: resizeTarget.target_height || hiresFix.target_height,
-  } : plan);
+  markStage("base", { status: "succeeded", progress: 0.95, progressLabel: "单次出图完成" });
+  const outputImages = await saveA1111Images(data.images || [], normalizedPlan, {
+    stage: "base",
+  });
 
   return {
     backend: InferenceBackends.A1111,
     baseUrl,
     ...data,
+    warnings: [
+      ...(Array.isArray(data.warnings) ? data.warnings : []),
+    ].filter(Boolean),
+    pipelineStages,
+    intermediateImages: [],
     outputImages,
   };
+}
+
+function normalizeSinglePassPlan(plan = {}) {
+  const normalized = normalizeGenerationPlan({
+    ...plan,
+    target_width: null,
+    target_height: null,
+    hires_fix: false,
+    refine: false,
+    upscale: false,
+  });
+  normalized.target_width = null;
+  normalized.target_height = null;
+  normalized.hires_fix = false;
+  normalized.refine = false;
+  normalized.upscale = false;
+  return normalized;
 }
 
 function buildA1111Prompt(plan = {}) {
@@ -187,83 +232,99 @@ function loraNameForPrompt(lora) {
     .replace(/\.(safetensors|ckpt|pt)$/i, "");
 }
 
+async function buildA1111ControlNetArgs(plan = {}) {
+  const units = [];
+  for (const control of Array.isArray(plan.controlnet) ? plan.controlnet : []) {
+    const unit = await normalizeControlNetUnit(control);
+    if (unit) units.push(unit);
+  }
+  return units;
+}
+
+async function normalizeControlNetUnit(control = {}) {
+  if (!control) return null;
+  const name = typeof control === "string" ? control : control.name || control.model || control.filename || "";
+  if (!name) return null;
+  if (typeof control === "string") {
+    throw new Error(`ControlNet ${name} requires a reference image.`);
+  }
+  const imageSource = control.image || control.input_image || control.reference_image || "";
+  if (!String(imageSource || "").trim()) {
+    throw new Error(`ControlNet ${name} requires a reference image.`);
+  }
+  const image = typeof control === "object"
+    ? await resolveControlNetImage(imageSource)
+    : "";
+  if (!image) throw new Error(`ControlNet ${name} reference image is empty.`);
+
+  const module = control.module || control.preprocessor || "none";
+  const model = control.extensionName || control.model || name;
+  return {
+    enabled: control.enabled !== false,
+    image,
+    module,
+    preprocessor: module,
+    model,
+    weight: finiteNumber(control.weight ?? control.control_weight, 1),
+    resize_mode: control.resize_mode || "Scale to Fit (Inner Fit)",
+    lowvram: Boolean(control.lowvram || control.low_vram),
+    processor_res: Math.round(finiteNumber(control.processor_res, 512)),
+    threshold_a: finiteNumber(control.threshold_a, 64),
+    threshold_b: finiteNumber(control.threshold_b, 64),
+    guidance_start: finiteNumber(control.guidance_start, 0),
+    guidance_end: finiteNumber(control.guidance_end, 1),
+    control_mode: control.control_mode || "Balanced",
+    pixel_perfect: control.pixel_perfect !== false,
+    save_detected_map: Boolean(control.save_detected_map),
+  };
+}
+
+async function resolveControlNetImage(value = "") {
+  const source = String(value || "").trim();
+  if (!source) return "";
+  if (source.startsWith("data:")) return stripDataUrlPrefix(source);
+  if (/^https?:\/\//i.test(source)) {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(`ControlNet reference image fetch failed: ${response.status} ${source}`);
+    return Buffer.from(await response.arrayBuffer()).toString("base64");
+  }
+  if (source.startsWith("/outputs/generations/")) {
+    const filename = decodeURIComponent(source.split("/").pop() || "");
+    if (!filename) return "";
+    return (await readFile(join(generationOutputDir, filename))).toString("base64");
+  }
+  if (source.startsWith("/outputs/controlnet/")) {
+    const filename = decodeURIComponent(source.split("/").pop() || "");
+    if (!filename) return "";
+    return (await readFile(join(controlNetReferenceDir, filename))).toString("base64");
+  }
+  if (existsSync(source)) {
+    return (await readFile(source)).toString("base64");
+  }
+  return stripDataUrlPrefix(source);
+}
+
 function formatWeight(value) {
   return String(Math.round(Number(value) * 100) / 100);
 }
 
-function resolveA1111HiresFix(plan = {}) {
-  const source = typeof plan.hires_fix === "object" && plan.hires_fix ? plan.hires_fix : {};
-  const explicitlyEnabled = plan.hires_fix === true || (source.enabled === true && source.mode !== "resize");
-  const width = Number(plan.width || 512);
-  const height = Number(plan.height || 512);
-  const targetWidth = Number(plan.target_width || source.target_width || 0);
-  const targetHeight = Number(plan.target_height || source.target_height || 0);
-  const targetDiffers = targetWidth > 0 && targetHeight > 0 && (targetWidth !== width || targetHeight !== height);
-
-  if (!explicitlyEnabled || !targetDiffers) {
-    return { enabled: false };
-  }
-
-  return {
-    enabled: true,
-    target_width: targetWidth,
-    target_height: targetHeight,
-    denoising_strength: finiteNumber(source.denoising_strength, 0.2),
-    upscaler: source.upscaler || "Lanczos",
-    second_pass_steps: Math.max(10, Math.round(finiteNumber(source.second_pass_steps, Math.round(Number(plan.steps || 8) * 0.6)))),
-  };
-}
-
-function resolveA1111ResizeTarget(plan = {}) {
-  const width = Number(plan.width || 512);
-  const height = Number(plan.height || 512);
-  const targetWidth = Number(plan.target_width || plan.hires_fix?.target_width || 0);
-  const targetHeight = Number(plan.target_height || plan.hires_fix?.target_height || 0);
-  const targetDiffers = targetWidth > 0 && targetHeight > 0 && (targetWidth !== width || targetHeight !== height);
-  return {
-    enabled: targetDiffers,
-    target_width: targetDiffers ? targetWidth : 0,
-    target_height: targetDiffers ? targetHeight : 0,
-  };
-}
-
-async function resizeA1111Images(baseUrl, images, target) {
-  const resized = [];
-  for (const image of images) {
-    const data = await postA1111JsonWithRecovery(baseUrl, "/sdapi/v1/extra-single-image", {
-      resize_mode: 1,
-      show_extras_results: true,
-      gfpgan_visibility: 0,
-      codeformer_visibility: 0,
-      codeformer_weight: 0,
-      upscaling_resize: 1,
-      upscaling_resize_w: target.target_width,
-      upscaling_resize_h: target.target_height,
-      upscaling_crop: false,
-      upscaler_1: "Lanczos",
-      upscaler_2: "None",
-      extras_upscaler_2_visibility: 0,
-      upscale_first: false,
-      image: stripDataUrlPrefix(image),
-    }, "resize");
-    resized.push(data.image || image);
-  }
-  return resized;
-}
-
-async function postA1111JsonWithRecovery(baseUrl, path, payload, action) {
+async function postA1111JsonWithRecovery(baseUrl, path, payload, action, options = {}) {
   const first = await postA1111Json(baseUrl, path, payload);
   if (first.ok) return first.data;
-  if (!isA1111DeviceMismatchError(first.body)) {
+  const recovered = typeof options.onFailure === "function" ? await options.onFailure(first) : null;
+  if (recovered) return recovered;
+  if (!isA1111RecoverableDeviceError(first.body)) {
     throw new Error(formatA1111Error(action, first));
   }
 
   await recoverA1111DeviceState(baseUrl);
   const retry = await postA1111Json(baseUrl, path, payload);
   if (retry.ok) return retry.data;
+  const retryRecovered = typeof options.onFailure === "function" ? await options.onFailure(retry) : null;
+  if (retryRecovered) return retryRecovered;
 
-  const message = isA1111DeviceMismatchError(retry.body)
-    ? `${formatA1111Error(action, retry)}. 已尝试自动重载 checkpoint 但仍失败，请在 A1111 中重新加载模型或重启 WebUI。`
+  const message = isA1111RecoverableDeviceError(retry.body)
+    ? `${formatA1111Error(action, retry)}. 已尝试自动重载 checkpoint 但仍失败。若你在 macOS Apple Silicon 上使用 MPS，请通过 scripts/start-a1111.sh 重启 A1111，确保 PYTORCH_ENABLE_MPS_FALLBACK=1 已生效；也可以临时关闭 ControlNet、LoRA 或降低基础分辨率后再试。`
     : formatA1111Error(action, retry);
   throw new Error(message);
 }
@@ -297,9 +358,10 @@ async function disableA1111KeepCheckpointInCpu(baseUrl) {
   });
 }
 
-function isA1111DeviceMismatchError(body = "") {
+function isA1111RecoverableDeviceError(body = "") {
   return /Expected all tensors to be on the same device/i.test(body)
-    || /at least two devices,\s*cpu and cuda/i.test(body);
+    || /at least two devices,\s*cpu and cuda/i.test(body)
+    || /Placeholder storage has not been allocated on MPS device/i.test(body);
 }
 
 function formatA1111Error(action, response) {
@@ -311,7 +373,15 @@ function finiteNumber(value, fallback) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-async function saveA1111Images(images, plan) {
+function normalizeModelLookupKey(value = "") {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\.(safetensors|ckpt|pt|pth)$/g, "")
+    .replace(/\[[a-f0-9]{6,}\]/g, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+async function saveA1111Images(images, plan, metadata = {}) {
   if (!Array.isArray(images) || images.length === 0) return [];
 
   await mkdir(generationOutputDir, { recursive: true });
@@ -328,6 +398,7 @@ async function saveA1111Images(images, plan) {
       filename,
       width: plan.target_width || plan.hires_fix?.target_width || plan.width,
       height: plan.target_height || plan.hires_fix?.target_height || plan.height,
+      stage: metadata.stage || "",
     });
   }
 
@@ -337,13 +408,15 @@ async function saveA1111Images(images, plan) {
 async function getA1111Models() {
   const manifest = await loadEngineManifest();
   const engine = manifest.engines.a1111;
-  const path = join(resolve(projectRoot, manifest.installDir), engine.directory);
+  const path = resolveWebuiRoot(manifest, engine);
   const baseUrl = resolveEngineBaseUrl(engine);
-  const [apiModels, apiLoras, apiSamplers, apiOptions] = await Promise.all([
+  const [apiModels, apiLoras, apiSamplers, apiUpscalers, apiOptions, controlnet] = await Promise.all([
     fetchJson(`${baseUrl}/sdapi/v1/sd-models`).catch(() => null),
     fetchJson(`${baseUrl}/sdapi/v1/loras`).catch(() => null),
     fetchJson(`${baseUrl}/sdapi/v1/samplers`).catch(() => null),
+    fetchJson(`${baseUrl}/sdapi/v1/upscalers`).catch(() => null),
     fetchJson(`${baseUrl}/sdapi/v1/options`).catch(() => null),
+    getA1111ControlNetCatalog(baseUrl).catch((error) => ({ installed: false, error: error.message, models: [], modules: [] })),
   ]);
   const filesystemModels = await scanFiles(join(path, engine.modelDirs.checkpoints), [".safetensors", ".ckpt"]);
   const filesystemLoras = await scanFiles(join(path, engine.modelDirs.loras), [".safetensors", ".pt"]);
@@ -358,13 +431,49 @@ async function getA1111Models() {
       ? apiLoras.map((model) => ({ name: model.name || model.alias, alias: model.alias, path: model.path, source: "api" }))
       : filesystemLoras,
     vaes: filesystemVaes,
-    controlnet: filesystemControlnet,
+    controlnet: mergeControlNetModels(filesystemControlnet, controlnet.models),
+    controlnetExtension: controlnet,
     samplers: Array.isArray(apiSamplers) ? apiSamplers.map((sampler) => ({ name: sampler.name, aliases: sampler.aliases || [], source: "api" })) : [],
+    upscalers: Array.isArray(apiUpscalers) ? apiUpscalers.map((upscaler) => ({ name: upscaler.name, modelName: upscaler.model_name, modelPath: upscaler.model_path, source: "api" })) : [],
     options: apiOptions ? {
       sdModelCheckpoint: apiOptions.sd_model_checkpoint,
       sdVae: apiOptions.sd_vae,
     } : {},
   };
+}
+
+async function getA1111ControlNetCatalog(baseUrl) {
+  const [models, modules] = await Promise.all([
+    fetchJson(`${baseUrl}/controlnet/model_list`).catch(() => null),
+    fetchJson(`${baseUrl}/controlnet/module_list`).catch(() => null),
+  ]);
+  const modelList = Array.isArray(models?.model_list) ? models.model_list : [];
+  const moduleList = Array.isArray(modules?.module_list) ? modules.module_list : [];
+  return {
+    installed: Boolean(models || modules),
+    models: modelList,
+    modules: moduleList,
+  };
+}
+
+function mergeControlNetModels(filesystemModels = [], extensionModels = []) {
+  const byName = new Map();
+  for (const model of filesystemModels) {
+    if (!model?.name) continue;
+    byName.set(model.name, { ...model, source: model.source || "filesystem" });
+  }
+  for (const name of extensionModels) {
+    const key = String(name || "").trim();
+    if (!key) continue;
+    const normalized = normalizeModelLookupKey(key);
+    const filesystemMatch = [...byName.values()].find((item) => normalizeModelLookupKey(item.name) === normalized || normalizeModelLookupKey(item.name).includes(normalized) || normalized.includes(normalizeModelLookupKey(item.name)));
+    if (filesystemMatch) {
+      byName.set(filesystemMatch.name, { ...filesystemMatch, model: key, extensionName: key, source: "api+filesystem" });
+    } else {
+      byName.set(key, { name: key, title: key, model: key, extensionName: key, source: "api" });
+    }
+  }
+  return [...byName.values()];
 }
 
 async function fetchJson(url) {
@@ -429,6 +538,10 @@ async function scanFiles(dir, allowedExtensions) {
     for (const entry of entries) {
       const path = join(dir, entry);
       const itemStat = await stat(path);
+      if (itemStat.isDirectory()) {
+        files.push(...await scanFiles(path, allowedExtensions));
+        continue;
+      }
       if (!itemStat.isFile()) continue;
       if (!allowedExtensions.includes(extname(entry).toLowerCase())) continue;
       files.push({ name: entry, path, size: itemStat.size, source: "filesystem" });
@@ -437,6 +550,12 @@ async function scanFiles(dir, allowedExtensions) {
   } catch {
     return [];
   }
+}
+
+function resolveWebuiRoot(manifest = {}, engine = {}) {
+  if (process.env.SD_WEBUI_ROOT) return resolve(process.env.SD_WEBUI_ROOT);
+  const installRoot = resolve(projectRoot, manifest.installDir || "vendor/engines");
+  return join(installRoot, engine.directory || "stable-diffusion-webui");
 }
 
 function resolveEngineBaseUrl(engine) {
