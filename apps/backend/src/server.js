@@ -32,7 +32,7 @@ import {
   upsertResourceProfiles,
   upsertResources,
 } from "./db.js";
-import { getBackendName, getEngineModels, getEngineStatus, loadEngineManifest } from "./engines.js";
+import { getBackendName, getEngineModels, getEngineStatus, loadEngineManifest, unloadA1111Model } from "./engines.js";
 import {
   importControlNetResource,
   listControlNetPresets,
@@ -49,7 +49,7 @@ import {
   updateLoraCaptions,
 } from "./lora-training.js";
 import { getKohyaInstallTask, getKohyaStatus, installKohyaRuntime } from "./kohya-installer.js";
-import { deleteLocalLlmModel, getLocalLlmInstallTask, getLocalLlmPullTask, getLocalLlmStatus, installLocalLlmRuntime, listLocalLlmPullTasks, localGemmaProvider, pullGemmaModel, pullLocalLlmModel, searchOllamaLibrary, getOllamaModelInfo } from "./local-llm.js";
+import { deleteLocalLlmModel, getLocalLlmInstallTask, getLocalLlmPullTask, getLocalLlmStatus, installLocalLlmRuntime, listLocalLlmPullTasks, localGemmaProvider, pullGemmaModel, pullLocalLlmModel, searchOllamaLibrary, getOllamaModelInfo, stopLocalLlmModel } from "./local-llm.js";
 import {
   compactModelContextForPlanning,
   compatibleLorasForCheckpoint,
@@ -638,7 +638,7 @@ async function buildModelContext() {
 
   const context = {
     webuiRoot: root,
-    checkpoints: a1111Checkpoints.length ? a1111Checkpoints : await scan("models/Stable-diffusion", [".safetensors", ".ckpt"]),
+    checkpoints: preferDefaultCheckpoint(a1111Checkpoints.length ? a1111Checkpoints : await scan("models/Stable-diffusion", [".safetensors", ".ckpt"])),
     loras: a1111Models.loras?.length ? a1111Models.loras : await scan("models/Lora", [".safetensors", ".pt"]),
     vaes: a1111Models.vaes?.length ? a1111Models.vaes : await scan("models/VAE", [".safetensors", ".ckpt", ".pt"]),
     controlnet: a1111Models.controlnet?.length ? a1111Models.controlnet : await scan("models/ControlNet", [".safetensors", ".pth", ".pt"]),
@@ -648,6 +648,17 @@ async function buildModelContext() {
   };
   ensureResourceProfilesFromModelContext(context);
   return compactModelContextForPlanning(context, listResourceProfiles());
+}
+
+function preferDefaultCheckpoint(checkpoints = []) {
+  const defaultCheckpoint = getAppSettings().defaultCheckpoint || "";
+  if (!defaultCheckpoint || !Array.isArray(checkpoints) || !checkpoints.length) return checkpoints;
+  const wanted = normalizeResourceLookupName(defaultCheckpoint);
+  const index = checkpoints.findIndex((checkpoint) => [checkpoint.title, checkpoint.name, checkpoint.filename]
+    .map(normalizeResourceLookupName)
+    .some((value) => value && (value === wanted || value.includes(wanted) || wanted.includes(value))));
+  if (index <= 0) return checkpoints;
+  return [checkpoints[index], ...checkpoints.slice(0, index), ...checkpoints.slice(index + 1)];
 }
 
 async function buildResources({ refreshIndex = false } = {}) {
@@ -665,6 +676,7 @@ async function buildResources({ refreshIndex = false } = {}) {
       samplers: models.samplers || [],
       upscalers: models.upscalers || [],
       controlnet: models.controlnet || [],
+      controlnetExtension: models.controlnetExtension || { installed: false, models: [], modules: [] },
       options: models.options || {},
       modelDirs: a1111.modelDirs || {},
       promptTools: a1111.promptTools || detectPromptTools(a1111.path),
@@ -878,10 +890,10 @@ async function runTagGenerationPlanner({
 } = {}) {
   const provider = createConfiguredProvider(providerOverride);
   const modelContext = await withPromptTagToolContext(modelContextOverride || await buildModelContext(), buildPromptTagSearchText(userRequest, [], currentPlan));
-  const plan = await provider.createGenerationPlan({
+  const plan = await withLowPerformanceProviderMemory(async () => provider.createGenerationPlan({
     userRequest,
     modelContext,
-  });
+  }), providerOverride);
   const hintedPlan = applyRequestedResourceHints({ ...currentPlan, ...plan }, {
     userRequest,
     conversation: [],
@@ -899,6 +911,46 @@ async function runTagGenerationPlanner({
     compatibility: validatePlan(normalizedPlan),
     promptTagTool: compactPromptTagToolForResponse(modelContext.promptTagTool),
   };
+}
+
+async function withLowPerformanceProviderMemory(action, providerOverride = null) {
+  const settings = getAppSettings();
+  const activeProfile = getActiveProviderProfile();
+  const providerConfig = providerOverride && Object.keys(providerOverride).length
+    ? normalizeProviderInput(providerOverride, { partial: true })
+    : activeProfile;
+  const localModel = providerConfig?.type === "local" ? providerConfig.model : "";
+  if (!settings.lowPerformanceMode || !localModel) return action();
+
+  const events = [];
+  try {
+    events.push(await unloadImageModelSafe());
+    const result = await action();
+    if (result && typeof result === "object") {
+      return {
+        ...result,
+        _lowPerformanceEvents: [
+          ...(Array.isArray(result._lowPerformanceEvents) ? result._lowPerformanceEvents : []),
+          ...events,
+        ],
+      };
+    }
+    return result;
+  } finally {
+    events.push(await stopLocalLlmModel(localModel));
+  }
+}
+
+async function unloadImageModelSafe() {
+  try {
+    return await unloadA1111Model();
+  } catch (error) {
+    return {
+      backend: getBackendName(),
+      unloaded: false,
+      error: error.message,
+    };
+  }
 }
 
 function buildReviseUserRequest({ currentPlan, conversation = [], userRequest = "" }) {
@@ -1184,7 +1236,10 @@ function validatePlan(plan = {}) {
 }
 
 function normalizePlanForResponse(rawPlan = {}) {
-  const plan = forceSinglePassPlan(normalizeGenerationPlan(rawPlan));
+  const plan = forceSinglePassPlan(normalizeGenerationPlan({
+    ...rawPlan,
+    checkpoint: rawPlan.checkpoint || getAppSettings().defaultCheckpoint || "",
+  }));
   const compatibility = validatePlan(plan);
   return forceSinglePassPlan(applyRuntimeSize(plan, compatibility.recommendedSize?.[aspectBucketForPlan(plan)]));
 }
@@ -1545,10 +1600,11 @@ async function testProvider() {
   const activeProfile = getActiveProviderProfile();
   const provider = createConfiguredProvider();
   const started = Date.now();
-  const plan = await provider.createGenerationPlan({
+  const modelContext = await buildModelContext();
+  const plan = await withLowPerformanceProviderMemory(async () => provider.createGenerationPlan({
     userRequest: `连接测试 ${randomUUID().slice(0, 8)}：生成一个极简头像方案。`,
-    modelContext: await buildModelContext(),
-  });
+    modelContext,
+  }), activeProfile);
   return {
     ok: true,
     latencyMs: Date.now() - started,
@@ -1563,10 +1619,11 @@ async function testProviderProfile(providerId) {
 
   try {
     const provider = createProvider(profileToProviderConfig(profile));
-    const plan = await provider.createGenerationPlan({
+    const modelContext = await buildModelContext();
+    const plan = await withLowPerformanceProviderMemory(async () => provider.createGenerationPlan({
       userRequest: `连接测试 ${randomUUID().slice(0, 8)}：生成一个极简头像方案。`,
-      modelContext: await buildModelContext(),
-    });
+      modelContext,
+    }), profile);
     return updateProviderTestStatus(providerId, {
       status: "ok",
       message: normalizePlanForResponse(plan).checkpoint || "Provider test succeeded.",

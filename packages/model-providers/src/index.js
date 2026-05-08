@@ -75,10 +75,10 @@ export class OpenAICompatibleProvider {
 
     const payload = {
       model: this.model,
-      temperature: 0.4,
+      temperature: 0.1,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: plannerSystemPrompt },
+        { role: "system", content: this.type === ProviderTypes.LOCAL ? localPlannerSystemPrompt : plannerSystemPrompt },
         { role: "user", content: JSON.stringify({ userRequest, modelContext }) },
       ],
     };
@@ -93,7 +93,13 @@ export class OpenAICompatibleProvider {
     }
 
     const content = data.choices?.[0]?.message?.content || "{}";
-    return normalizePlanForModelContext(JSON.parse(extractJson(content)), modelContext);
+    return normalizePlanForModelContext(await parseGenerationPlanJson({
+      content,
+      provider: this,
+      payload,
+      userRequest,
+      modelContext,
+    }), modelContext);
   }
 
   async requestChatCompletion(payload) {
@@ -113,6 +119,39 @@ export class OpenAICompatibleProvider {
     return response.json();
   }
 
+}
+
+async function parseGenerationPlanJson({ content, provider, payload, userRequest, modelContext }) {
+  try {
+    return JSON.parse(extractJson(content));
+  } catch (error) {
+    const retryPayload = {
+      ...payload,
+      temperature: 0,
+      messages: [
+        { role: "system", content: strictJsonRepairPrompt },
+        {
+          role: "user",
+          content: JSON.stringify({
+            userRequest,
+            modelContext,
+            invalidResponse: String(content || "").slice(0, 4000),
+            parseError: error.message,
+          }),
+        },
+      ],
+    };
+    try {
+      const retryData = await provider.requestChatCompletion(retryPayload);
+      const retryContent = retryData.choices?.[0]?.message?.content || "{}";
+      return JSON.parse(extractJson(retryContent));
+    } catch (retryError) {
+      if (provider.type === ProviderTypes.LOCAL) {
+        return new MockProvider().createGenerationPlan({ userRequest, modelContext });
+      }
+      throw retryError;
+    }
+  }
 }
 
 export class AnthropicProvider {
@@ -216,9 +255,31 @@ adetailer 必须为 false。
 在当前 MuseForge 简化模式下，target_width=null, target_height=null, hires_fix=false, adetailer=false。
 `;
 
+const strictJsonRepairPrompt = `
+You are a Stable Diffusion plan JSON repair service.
+Return only one valid JSON object. Do not include markdown, prose, comments, or explanations.
+The JSON object must include these keys:
+task_type, positive_prompt, negative_prompt, checkpoint, lora, controlnet, width, height,
+target_width, target_height, sampler, steps, cfg_scale, seed, batch_size, hires_fix,
+adetailer, rationale.
+Use only resources and samplers from modelContext. If unsure, choose the first checkpoint.
+Prompts must be comma-separated English Stable Diffusion tags.
+Set target_width=null, target_height=null, hires_fix=false, adetailer=false.
+`;
+
 const plannerSystemPrompt = `${resourceCompatibilitySystemPrompt}
 ${promptAllInOneSystemPrompt}
 ${generationPlannerSystemPrompt}`;
+
+const localPlannerSystemPrompt = `${resourceCompatibilitySystemPrompt}
+${promptAllInOneSystemPrompt}
+You are MuseForge local planner. Return only one valid JSON object. No markdown, no greeting, no explanation outside JSON.
+Required keys: task_type, positive_prompt, negative_prompt, checkpoint, lora, controlnet, width, height, target_width, target_height, sampler, steps, cfg_scale, seed, batch_size, hires_fix, adetailer, rationale.
+Use only resources from modelContext. The checkpoint must be one modelContext checkpoint title or name. Prefer the first checkpoint if the user does not specify.
+Write positive_prompt and negative_prompt as short comma-separated English Stable Diffusion tags.
+For SDXL/Pony use 1024x1024 square, 832x1216 portrait, 1216x832 landscape. For SD1.5 use 512x512 square, 512x768 portrait, 768x512 landscape.
+Always set target_width=null, target_height=null, hires_fix=false, adetailer=false.
+Return JSON now.`;
 
 function buildMockPrompt(userRequest = "") {
   return [

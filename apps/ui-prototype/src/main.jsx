@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -72,6 +72,7 @@ function App() {
   const [health, setHealth] = useState(null);
   const [engineModels, setEngineModels] = useState(null);
   const [resources, setResources] = useState(null);
+  const [runtimeSettings, setRuntimeSettings] = useState(null);
   const [connectionError, setConnectionError] = useState("");
   const [topGenerateRequest, setTopGenerateRequest] = useState(0);
 
@@ -91,12 +92,14 @@ function App() {
 
   async function refreshStatus() {
     try {
-      const [nextHealth, nextModels] = await Promise.all([
+      const [nextHealth, nextModels, nextSettings] = await Promise.all([
         apiGet("/health"),
         apiGet("/api/engines/models"),
+        apiGet("/api/settings/runtime"),
       ]);
       setHealth(nextHealth);
       setEngineModels(nextModels);
+      setRuntimeSettings(nextSettings.settings || {});
       apiGet("/api/resources").then(setResources).catch(() => {});
       setConnectionError("");
     } catch (error) {
@@ -169,6 +172,7 @@ function App() {
             loras={loras}
             samplers={samplers}
             resources={resources}
+            runtimeSettings={runtimeSettings}
             promptTools={a1111?.promptTools}
             refreshStatus={refreshStatus}
             topGenerateRequest={topGenerateRequest}
@@ -183,6 +187,7 @@ function App() {
             loras={loras}
             samplers={samplers}
             resources={resources}
+            runtimeSettings={runtimeSettings}
             refreshStatus={refreshStatus}
             topGenerateRequest={topGenerateRequest}
             setScreen={setScreen}
@@ -199,12 +204,12 @@ function App() {
   );
 }
 
-function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, refreshStatus, topGenerateRequest, setScreen }) {
+function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, runtimeSettings, refreshStatus, topGenerateRequest, setScreen }) {
   const [conversation, setConversation] = useState([
     { role: "agent", text: "告诉我你想要的画面、用途和风格，我会先匹配 tags 并生成可编辑参数；确认后再提交到 A1111 单次出图。" },
   ]);
   const [requestText, setRequestText] = useState("画一个银发少女，穿黑色礼服，坐在雨夜咖啡馆窗边，精致插画，适合手机壁纸。");
-  const [plan, setPlan] = useState(() => ({ ...defaultPlan, checkpoint: checkpointTitle(checkpoints[0]) }));
+  const [plan, setPlan] = useState(() => ({ ...defaultPlan, checkpoint: defaultCheckpointForUi(checkpoints, runtimeSettings) }));
   const [pendingPlan, setPendingPlan] = useState(null);
   const [results, setResults] = useState([]);
   const [planning, setPlanning] = useState(false);
@@ -214,10 +219,11 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!plan.checkpoint && checkpoints[0]) {
-      setPlan((current) => ({ ...current, checkpoint: checkpointTitle(checkpoints[0]) }));
+    if (!plan.checkpoint) {
+      const checkpoint = defaultCheckpointForUi(checkpoints, runtimeSettings);
+      if (checkpoint) setPlan((current) => ({ ...current, checkpoint }));
     }
-  }, [checkpoints, plan.checkpoint]);
+  }, [checkpoints, runtimeSettings?.defaultCheckpoint, plan.checkpoint]);
 
   useEffect(() => {
     loadGenerations();
@@ -274,7 +280,7 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
       if (!task) return;
       setActiveTask(task);
       setPendingPlan(null);
-      setPlan(normalizePlanForUi(task.plan || {}, checkpoints));
+      setPlan(normalizePlanForUi(task.plan || {}, checkpoints, runtimeSettings));
       setConversation((items) => [...items, { role: "agent", text: `已接回正在处理的任务：${task.id.slice(0, 8)}。` }]);
     } catch (error) {
       setError(error.message);
@@ -300,7 +306,7 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
       const response = await apiPost(endpoint, endpoint.endsWith("revise")
         ? { userRequest: withReferenceContext(userMessage, selectedReference), conversation: conversation.slice(-6), plan: sourcePlan }
         : { userRequest: `${recentContext}\nuser: ${userMessage}` });
-      const nextPlan = normalizePlanForUi(response.plan, checkpoints);
+      const nextPlan = normalizePlanForUi(response.plan, checkpoints, runtimeSettings);
       setPlan(nextPlan);
       setPendingPlan(nextPlan);
       setConversation((items) => [...items, { role: "agent", text: "已解析方案，请确认参数后再生成；也可以继续描述修改。" }]);
@@ -373,7 +379,7 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
   }
 
   async function reuseGeneration(item) {
-    const nextPlan = normalizePlanForUi({ ...(item.plan || {}), seed: -1 }, checkpoints);
+    const nextPlan = normalizePlanForUi({ ...(item.plan || {}), seed: -1 }, checkpoints, runtimeSettings);
     const reference = generationReference(item, nextPlan);
     setPlan(nextPlan);
     setPendingPlan(nextPlan);
@@ -478,10 +484,10 @@ function ChatGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, sa
   );
 }
 
-function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, promptTools, refreshStatus, topGenerateRequest, setScreen }) {
+function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, samplers, resources, runtimeSettings, promptTools, refreshStatus, topGenerateRequest, setScreen }) {
   const [conversation, setConversation] = useState([]);
   const [requestText, setRequestText] = useState("");
-  const [plan, setPlan] = useState(() => ({ ...defaultPlan, checkpoint: checkpointTitle(checkpoints[0]) }));
+  const [plan, setPlan] = useState(() => ({ ...defaultPlan, checkpoint: defaultCheckpointForUi(checkpoints, runtimeSettings) }));
   const [results, setResults] = useState([]);
   const [planning, setPlanning] = useState(false);
   const [activeTask, setActiveTask] = useState(null);
@@ -493,10 +499,11 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
   const [tagLibraryError, setTagLibraryError] = useState("");
 
   useEffect(() => {
-    if (!plan.checkpoint && checkpoints[0]) {
-      setPlan((current) => ({ ...current, checkpoint: checkpointTitle(checkpoints[0]) }));
+    if (!plan.checkpoint) {
+      const checkpoint = defaultCheckpointForUi(checkpoints, runtimeSettings);
+      if (checkpoint) setPlan((current) => ({ ...current, checkpoint }));
     }
-  }, [checkpoints, plan.checkpoint]);
+  }, [checkpoints, runtimeSettings?.defaultCheckpoint, plan.checkpoint]);
 
   useEffect(() => {
     loadGenerations();
@@ -560,7 +567,7 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
       const task = await loadCurrentGenerationTask();
       if (!task) return;
       setActiveTask(task);
-      setPlan(normalizePlanForUi(task.plan || {}, checkpoints));
+      setPlan(normalizePlanForUi(task.plan || {}, checkpoints, runtimeSettings));
       setConversation((items) => [...items, { role: "agent", text: `已接回正在处理的任务：${task.id.slice(0, 8)}。` }]);
     } catch (error) {
       setError(error.message);
@@ -580,7 +587,7 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
       const response = await apiPost(endpoint, endpoint.endsWith("revise")
         ? { userRequest: userMessage, conversation: conversation.slice(-6), plan }
         : { userRequest: `${recentContext}\nuser: ${userMessage}` });
-      const nextPlan = normalizePlanForUi(response.plan, checkpoints);
+      const nextPlan = normalizePlanForUi(response.plan, checkpoints, runtimeSettings);
       setPlan(nextPlan);
       setConversation((items) => [
         ...items,
@@ -668,7 +675,7 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
     const nextPlan = normalizePlanForUi({
       ...(item.plan || {}),
       seed: fixedSeed ? item.plan?.seed ?? -1 : -1,
-    }, checkpoints);
+    }, checkpoints, runtimeSettings);
     setPlan(nextPlan);
     setConversation((items) => [...items, { role: "agent", text: fixedSeed ? "已复用历史参数并固定 seed。" : "已复用历史参数，seed 已重置为随机。" }]);
   }
@@ -861,12 +868,11 @@ function AssistGenerateScreen({ webuiOnline, backendOnline, checkpoints, loras, 
                 <h2>Controls</h2>
                 <span>{sizeSummary(plan)}</span>
               </div>
-              <label className="span-field">Checkpoint<select value={plan.checkpoint} onChange={(event) => setPlanValue(setPlan, "checkpoint", event.target.value)}>
-                <option value="">选择 checkpoint</option>
-                {checkpoints.map((checkpoint) => (
-                  <option key={checkpointTitle(checkpoint)} value={checkpointTitle(checkpoint)}>{checkpointTitle(checkpoint)}</option>
-                ))}
-              </select></label>
+              <CheckpointInput
+                value={plan.checkpoint}
+                checkpoints={checkpoints}
+                onChange={(value) => setPlanValue(setPlan, "checkpoint", value)}
+              />
               <div className="assist-param-grid">
                 <label>W<input type="number" value={plan.width} onChange={(event) => setNumberPlanValue(setPlan, "width", event.target.value)} /></label>
                 <label>H<input type="number" value={plan.height} onChange={(event) => setNumberPlanValue(setPlan, "height", event.target.value)} /></label>
@@ -977,12 +983,11 @@ function ChatPlanConfirm({ plan, setPlan, checkpoints, loras, samplers, resource
             <span>{plan.steps} steps · CFG {plan.cfg_scale}</span>
           </div>
 
-          <label className="span-field">Checkpoint<select value={plan.checkpoint} onChange={(event) => setPlanValue(setPlan, "checkpoint", event.target.value)}>
-            <option value="">选择 checkpoint</option>
-            {checkpoints.map((checkpoint) => (
-              <option key={checkpointTitle(checkpoint)} value={checkpointTitle(checkpoint)}>{checkpointTitle(checkpoint)}</option>
-            ))}
-          </select></label>
+          <CheckpointInput
+            value={plan.checkpoint}
+            checkpoints={checkpoints}
+            onChange={(value) => setPlanValue(setPlan, "checkpoint", value)}
+          />
 
           <div className="chat-param-grid">
             <label>W<input type="number" value={plan.width} onChange={(event) => setNumberPlanValue(setPlan, "width", event.target.value)} /></label>
@@ -1023,6 +1028,27 @@ function ChatPlanConfirm({ plan, setPlan, checkpoints, loras, samplers, resource
         <button className="primary-action" onClick={onConfirm} disabled={!canConfirm}>确认生成</button>
       </div>
     </div>
+  );
+}
+
+function CheckpointInput({ value, checkpoints = [], onChange }) {
+  const listId = useId();
+  const options = checkpoints.map(checkpointTitle).filter(Boolean);
+  return (
+    <label className="span-field checkpoint-input-field">
+      Checkpoint
+      <input
+        list={listId}
+        value={value || ""}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="输入或选择 checkpoint"
+      />
+      <datalist id={listId}>
+        {options.map((checkpoint) => (
+          <option key={checkpoint} value={checkpoint} />
+        ))}
+      </datalist>
+    </label>
   );
 }
 
@@ -3748,13 +3774,10 @@ async function loadCurrentGenerationTask() {
   return (response.tasks || []).find(isTaskActive) || null;
 }
 
-function normalizePlanForUi(plan = {}, checkpoints = []) {
-  const checkpoint = plan.checkpoint || checkpointTitle(checkpoints[0]);
-  const requestedWidth = clampNumber(plan.width, 256, 2048, defaultPlan.width);
-  const requestedHeight = clampNumber(plan.height, 256, 2048, defaultPlan.height);
-  const baseSize = recommendedBaseSizeForUi(requestedWidth, requestedHeight);
-  const width = baseSize.width;
-  const height = baseSize.height;
+function normalizePlanForUi(plan = {}, checkpoints = [], runtimeSettings = {}) {
+  const checkpoint = plan.checkpoint || defaultCheckpointForUi(checkpoints, runtimeSettings);
+  const width = clampNumber(plan.width, 256, 2048, defaultPlan.width);
+  const height = clampNumber(plan.height, 256, 2048, defaultPlan.height);
   return {
     ...defaultPlan,
     ...plan,
@@ -3775,16 +3798,30 @@ function normalizePlanForUi(plan = {}, checkpoints = []) {
   };
 }
 
+function defaultCheckpointForUi(checkpoints = [], runtimeSettings = {}) {
+  const preferred = runtimeSettings?.defaultCheckpoint || "";
+  if (preferred) {
+    const match = checkpoints.find((checkpoint) => checkpointMatchesName(checkpoint, preferred));
+    if (match) return checkpointTitle(match);
+    return preferred;
+  }
+  return checkpointTitle(checkpoints[0]);
+}
+
+function checkpointMatchesName(checkpoint, value = "") {
+  const wanted = normalizeResourceKey(value);
+  if (!wanted) return false;
+  return [checkpoint?.title, checkpoint?.name, checkpoint?.filename]
+    .map(normalizeResourceKey)
+    .filter(Boolean)
+    .some((candidate) => candidate === wanted || candidate.includes(wanted) || wanted.includes(candidate));
+}
+
 function normalizePlanForRun(plan) {
-  const requestedWidth = clampNumber(plan.width, 256, 2048, 512);
-  const requestedHeight = clampNumber(plan.height, 256, 2048, 512);
-  const baseSize = recommendedBaseSizeForUi(requestedWidth, requestedHeight);
-  const width = baseSize.width;
-  const height = baseSize.height;
   return {
     ...plan,
-    width,
-    height,
+    width: clampNumber(plan.width, 256, 2048, 512),
+    height: clampNumber(plan.height, 256, 2048, 512),
     target_width: null,
     target_height: null,
     steps: clampNumber(plan.steps, 1, 80, 8),
@@ -3808,10 +3845,7 @@ function nullableNumber(value) {
 function recommendedBaseSizeForUi(width = 512, height = 512) {
   const safeWidth = clampNumber(width, 256, 2048, 512);
   const safeHeight = clampNumber(height, 256, 2048, 512);
-  const ratio = safeWidth / safeHeight;
-  if (ratio < 0.9) return { width: 512, height: 768 };
-  if (ratio > 1.1) return { width: 768, height: 512 };
-  return { width: 512, height: 512 };
+  return { width: safeWidth, height: safeHeight };
 }
 
 function sizeSummary(plan = {}) {
@@ -3966,13 +4000,9 @@ function setNumberPlanValue(setPlan, key, value) {
     return;
   }
   setPlan((plan) => {
-    const requestedWidth = key === "width" ? clampNumber(nextValue, 256, 2048, plan.width || 512) : clampNumber(plan.width, 256, 2048, 512);
-    const requestedHeight = key === "height" ? clampNumber(nextValue, 256, 2048, plan.height || 512) : clampNumber(plan.height, 256, 2048, 512);
-    const baseSize = recommendedBaseSizeForUi(requestedWidth, requestedHeight);
     return {
       ...plan,
-      width: baseSize.width,
-      height: baseSize.height,
+      [key]: nextValue,
       target_width: null,
       target_height: null,
       hires_fix: false,

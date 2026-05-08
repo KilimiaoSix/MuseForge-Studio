@@ -90,9 +90,9 @@ export function normalizeGenerationPlan(plan = {}) {
   }
   const requestedWidth = clampInteger(normalized.width, 256, 2048, 512);
   const requestedHeight = clampInteger(normalized.height, 256, 2048, 512);
-  const baseSize = recommendedBaseSize(requestedWidth, requestedHeight);
-  normalized.width = baseSize.width;
-  normalized.height = baseSize.height;
+  const baseSize = { width: requestedWidth, height: requestedHeight };
+  normalized.width = requestedWidth;
+  normalized.height = requestedHeight;
   normalized.target_width = optionalInteger(normalized.target_width, 256, 4096);
   normalized.target_height = optionalInteger(normalized.target_height, 256, 4096);
   if ((!normalized.target_width || !normalized.target_height) && (requestedWidth !== baseSize.width || requestedHeight !== baseSize.height)) {
@@ -203,10 +203,7 @@ export function normalizeUpscale(plan = {}) {
 export function recommendedBaseSize(width = 512, height = 512) {
   const safeWidth = clampInteger(width, 256, 2048, 512);
   const safeHeight = clampInteger(height, 256, 2048, 512);
-  const ratio = safeWidth / safeHeight;
-  if (ratio < 0.9) return { width: 512, height: 768 };
-  if (ratio > 1.1) return { width: 768, height: 512 };
-  return { width: 512, height: 512 };
+  return { width: safeWidth, height: safeHeight };
 }
 
 export function normalizeLoras(loras = []) {

@@ -221,12 +221,23 @@ export async function getOllamaModelInfo(model = "") {
 export async function stopLocalLlmModel(model = localGemmaProvider.model) {
   const ollamaCommand = resolveOllamaCommand();
   const modelName = String(model || localGemmaProvider.model).trim();
-  if (!ollamaCommand || !modelName) {
+  if (!modelName) {
     return {
       runtime: "ollama",
       model: modelName,
       stopped: false,
-      error: ollamaCommand ? "model is empty" : "ollama command not found",
+      error: "model is empty",
+    };
+  }
+
+  const apiResult = await unloadOllamaModelViaApi(modelName);
+  if (apiResult.stopped) return apiResult;
+
+  if (!ollamaCommand) {
+    return {
+      ...apiResult,
+      stopped: false,
+      error: apiResult.error || "ollama command not found",
     };
   }
 
@@ -237,8 +248,37 @@ export async function stopLocalLlmModel(model = localGemmaProvider.model) {
     stopped: command.ok,
     stdout: command.stdout,
     stderr: command.stderr,
-    error: command.error,
+    error: command.error || apiResult.error,
   };
+}
+
+async function unloadOllamaModelViaApi(model) {
+  try {
+    const response = await fetch("http://127.0.0.1:11434/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, keep_alive: 0 }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const text = await response.text();
+    return {
+      runtime: "ollama",
+      model,
+      stopped: response.ok,
+      stdout: text,
+      stderr: "",
+      error: response.ok ? "" : `Ollama unload failed: ${response.status} ${text}`,
+    };
+  } catch (error) {
+    return {
+      runtime: "ollama",
+      model,
+      stopped: false,
+      stdout: "",
+      stderr: "",
+      error: error.message,
+    };
+  }
 }
 
 export function resolveOllamaCommand() {

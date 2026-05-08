@@ -112,6 +112,7 @@ ensureColumn("generations", "purpose", "TEXT NOT NULL DEFAULT ''");
 
 const defaultAppSettings = Object.freeze({
   lowPerformanceMode: false,
+  defaultCheckpoint: "",
 });
 
 export function getAppSettings() {
@@ -130,11 +131,14 @@ export function updateAppSettings(patch = {}) {
   const now = new Date().toISOString();
   for (const key of Object.keys(defaultAppSettings)) {
     if (!Object.hasOwn(patch, key)) continue;
+    const value = typeof defaultAppSettings[key] === "boolean"
+      ? Boolean(patch[key])
+      : String(patch[key] || "");
     db.prepare(`
       INSERT INTO app_settings (key, value, updated_at)
       VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(key, JSON.stringify(Boolean(patch[key])), now);
+    `).run(key, JSON.stringify(value), now);
   }
 
   return getAppSettings();

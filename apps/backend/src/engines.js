@@ -192,6 +192,8 @@ export async function runA1111Txt2Img(plan, options = {}) {
 }
 
 function normalizeSinglePassPlan(plan = {}) {
+  const requestedWidth = finiteNumber(plan.width, 512);
+  const requestedHeight = finiteNumber(plan.height, 512);
   const normalized = normalizeGenerationPlan({
     ...plan,
     target_width: null,
@@ -200,6 +202,8 @@ function normalizeSinglePassPlan(plan = {}) {
     refine: false,
     upscale: false,
   });
+  normalized.width = Math.max(256, Math.min(2048, Math.round(requestedWidth)));
+  normalized.height = Math.max(256, Math.min(2048, Math.round(requestedHeight)));
   normalized.target_width = null;
   normalized.target_height = null;
   normalized.hires_fix = false;
